@@ -376,19 +376,6 @@ def main(page: ft.Page):
     page.window.frameless = True
     page.window.shadow = False
 
-    # Hide tick marks that Flutter draws by default when a Slider has
-    # `divisions` set. Transparent makes them invisible without losing
-    # snap-to-step behavior.
-    try:
-        page.theme = ft.Theme(
-            slider_theme=ft.SliderTheme(
-                active_tick_mark_color=ft.Colors.TRANSPARENT,
-                inactive_tick_mark_color=ft.Colors.TRANSPARENT,
-            )
-        )
-    except Exception:
-        log.exception("Failed to apply slider theme")
-
     page_ref[0] = page
 
     if TRAY_AVAILABLE:
@@ -1747,7 +1734,6 @@ def main(page: ft.Page):
                     ft.Slider(
                         ref=opacity_slider,
                         min=0.3, max=1.0, value=opacity_value,
-                        divisions=14,  # 0.05 steps — discretizes events
                         active_color=ACCENT_COLOR,
                         inactive_color="#333333",
                         on_change=on_opacity_change,
