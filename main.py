@@ -876,37 +876,41 @@ def main(page: ft.Page):
         nonlocal opacity_value
         if is_locked[0]:
             return
-        # 60fps cap — drop events that arrive within 16ms of the previous one.
-        # Lets the slider feel smooth without hammering page.update().
+        # 30fps cap is plenty smooth visually and gives more headroom per
+        # frame. The bottleneck while dragging used to be page.update()
+        # diffing/repainting 2+N task containers every tick.
         import time
         now = time.time()
-        if now - last_opacity_update[0] < 0.016:
+        if now - last_opacity_update[0] < 0.033:
             return
 
-        # 0.01 resolution — was 0.1 which gave only 8 discrete steps and
-        # made the slider feel "sticky".
         val = round(e.control.value, 2)
         if val == opacity_value:
             return
         last_opacity_update[0] = now
         opacity_value = val
 
+        # During drag: only update the main background. Task containers and
+        # the input field sync up on release (on_change_end). This keeps the
+        # per-event work to a single control regardless of how many tasks
+        # are on screen — dragging feels instant.
+        main_container.current.bgcolor = get_bg_color(opacity_value)
+        page.update(main_container.current)
+
+    def on_opacity_change_end(e):
+        if is_locked[0]:
+            return
+        # Final pass: sync task cards + input field to the final opacity,
+        # and persist the setting.
         bg = get_bg_color(opacity_value)
         card = get_card_color(opacity_value)
         main_container.current.bgcolor = bg
         input_field.current.fill_color = card
         for task_info in tasks_data_list:
             task_info["container"].bgcolor = card
-
-        page.update()
-
-    def on_opacity_change_end(e):
-        # Save settings only when the user releases the slider, not on every
-        # tick. Saver was rescheduling its threading.Timer ~10x/sec before.
-        if is_locked[0]:
-            return
         settings["opacity"] = opacity_value
         saver.save_settings_deferred(settings.copy())
+        page.update()
 
     def close_app(e):
         if is_locked[0]:
