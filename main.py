@@ -870,47 +870,32 @@ def main(page: ft.Page):
         for task_info in tasks_data_list:
             task_info["container"].bgcolor = card
 
-    last_opacity_update = [0.0]
-
     def on_opacity_change(e):
         nonlocal opacity_value
         if is_locked[0]:
             return
-        # 30fps cap is plenty smooth visually and gives more headroom per
-        # frame. The bottleneck while dragging used to be page.update()
-        # diffing/repainting 2+N task containers every tick.
-        import time
-        now = time.time()
-        if now - last_opacity_update[0] < 0.033:
-            return
-
+        # With divisions=14 on the slider, on_change only fires when the
+        # value snaps to a new step (≤15 events per drag instead of 60+/s
+        # for a continuous slider). That keeps Flutter's repaint pipeline
+        # from queueing up — no more drag lag.
         val = round(e.control.value, 2)
         if val == opacity_value:
             return
-        last_opacity_update[0] = now
         opacity_value = val
 
-        # During drag: only update the main background. Task containers and
-        # the input field sync up on release (on_change_end). This keeps the
-        # per-event work to a single control regardless of how many tasks
-        # are on screen — dragging feels instant.
-        main_container.current.bgcolor = get_bg_color(opacity_value)
-        page.update(main_container.current)
-
-    def on_opacity_change_end(e):
-        if is_locked[0]:
-            return
-        # Final pass: sync task cards + input field to the final opacity,
-        # and persist the setting.
         bg = get_bg_color(opacity_value)
         card = get_card_color(opacity_value)
         main_container.current.bgcolor = bg
         input_field.current.fill_color = card
         for task_info in tasks_data_list:
             task_info["container"].bgcolor = card
+        page.update()
+
+    def on_opacity_change_end(e):
+        if is_locked[0]:
+            return
         settings["opacity"] = opacity_value
         saver.save_settings_deferred(settings.copy())
-        page.update()
 
     def close_app(e):
         if is_locked[0]:
@@ -1749,6 +1734,7 @@ def main(page: ft.Page):
                     ft.Slider(
                         ref=opacity_slider,
                         min=0.3, max=1.0, value=opacity_value,
+                        divisions=14,  # 0.05 steps — discretizes events
                         active_color=ACCENT_COLOR,
                         inactive_color="#333333",
                         on_change=on_opacity_change,
