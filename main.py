@@ -523,64 +523,83 @@ def main(page: ft.Page):
         path = att.get("path", "")
         return name.endswith(IMAGE_EXTS) and bool(path) and os.path.exists(path)
 
+    def _build_chip(att, task_info):
+        is_file = att.get("type") == "file"
+        name = att.get("name") or att.get("url", "Ссылка")
+        display = name[:22] + ("…" if len(name) > 22 else "")
+
+        leading = None
+        if _is_image_attachment(att):
+            try:
+                leading = ft.Image(
+                    src=att["path"],
+                    width=16,
+                    height=16,
+                    fit=ft.BoxFit.COVER,
+                    border_radius=3,
+                )
+            except Exception:
+                log.exception("build_chip: ft.Image construction failed for %r",
+                              att.get("path"))
+                leading = None
+        if leading is None:
+            icon = ft.Icons.ATTACH_FILE_ROUNDED if is_file else ft.Icons.LINK_ROUNDED
+            leading = ft.Icon(icon, size=12, color="#9B7FF0")
+
+        return ft.Container(
+            content=ft.Row(
+                controls=[
+                    leading,
+                    ft.Text(display, size=10, color="#9B7FF0"),
+                    ft.GestureDetector(
+                        content=ft.Icon(ft.Icons.CLOSE, size=10, color="#666666"),
+                        on_tap=lambda e, a=att, ti=task_info: remove_attachment(ti, a),
+                    ),
+                ],
+                spacing=4,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            padding=ft.Padding(6, 3, 6, 3),
+            margin=ft.Margin(0, 0, 4, 0),
+            border_radius=12,
+            bgcolor="#2A2040",
+            on_click=lambda e, a=att: open_attachment(a),
+            tooltip=name,
+        )
+
     def _rebuild_attachment_chips(task_info):
         attachments = task_info.get("attachments", [])
         row = task_info.get("attachments_row")
         container = task_info.get("attachments_container")
+        log.info("rebuild_chips: attachments=%d row=%s container=%s",
+                 len(attachments), row is not None, container is not None)
         if row is None:
+            log.warning("rebuild_chips: attachments_row missing for task id=%s",
+                        task_info.get("id"))
             return
 
         row.controls.clear()
         for att in attachments:
-            is_file = att["type"] == "file"
-            name = att.get("name") or att.get("url", "Ссылка")
-            display = name[:22] + ("…" if len(name) > 22 else "")
-
-            if _is_image_attachment(att):
-                leading = ft.Container(
-                    content=ft.Image(
-                        src=att["path"],
-                        width=14,
-                        height=14,
-                        fit=ft.BoxFit.COVER,
-                        error_content=ft.Icon(
-                            ft.Icons.BROKEN_IMAGE_OUTLINED, size=11, color="#9B7FF0"
-                        ),
-                    ),
-                    width=14,
-                    height=14,
-                    border_radius=3,
-                    clip_behavior=ft.ClipBehavior.HARD_EDGE,
-                )
-            else:
-                icon = ft.Icons.ATTACH_FILE_ROUNDED if is_file else ft.Icons.LINK_ROUNDED
-                leading = ft.Icon(icon, size=11, color="#9B7FF0")
-
-            chip = ft.Container(
-                content=ft.Row(
-                    controls=[
-                        leading,
-                        ft.Text(display, size=10, color="#9B7FF0"),
-                        ft.GestureDetector(
-                            content=ft.Icon(ft.Icons.CLOSE, size=10, color="#666666"),
-                            on_tap=lambda e, a=att, ti=task_info: remove_attachment(ti, a),
-                        ),
-                    ],
-                    spacing=4,
-                    tight=True,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-                padding=ft.Padding(6, 3, 6, 3),
-                margin=ft.Margin(0, 0, 4, 0),
-                border_radius=12,
-                bgcolor="#2A2040",
-                on_click=lambda e, a=att: open_attachment(a),
-                tooltip=name,
-            )
-            row.controls.append(chip)
+            try:
+                chip = _build_chip(att, task_info)
+                row.controls.append(chip)
+            except Exception:
+                log.exception("rebuild_chips: failed to build chip for %r",
+                              att.get("name"))
 
         if container is not None:
             container.visible = len(attachments) > 0
+            try:
+                container.update()
+            except Exception:
+                # Control may not be mounted yet at first build; fine.
+                pass
+        try:
+            row.update()
+        except Exception:
+            pass
+        log.info("rebuild_chips: built %d chip(s)", len(row.controls))
 
     def show_attach_dialog(task_info):
         if is_locked[0]:
