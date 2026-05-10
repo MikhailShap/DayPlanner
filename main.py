@@ -111,6 +111,27 @@ kernel32 = ctypes.windll.kernel32
 GMEM_MOVEABLE = 0x0002
 CF_UNICODETEXT = 13
 
+# Explicit ctypes signatures — without these, Python truncates HGLOBAL/LPVOID
+# to int on 64-bit Windows and GlobalLock returns NULL. This was the cause
+# of "clipboard: GlobalLock failed" in the log.
+kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+kernel32.GlobalAlloc.restype = ctypes.c_void_p
+kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+kernel32.GlobalLock.restype = ctypes.c_void_p
+kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+kernel32.GlobalUnlock.restype = wintypes.BOOL
+kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+kernel32.GlobalFree.restype = ctypes.c_void_p
+
+user32.OpenClipboard.argtypes = [wintypes.HWND]
+user32.OpenClipboard.restype = wintypes.BOOL
+user32.EmptyClipboard.argtypes = []
+user32.EmptyClipboard.restype = wintypes.BOOL
+user32.SetClipboardData.argtypes = [wintypes.UINT, ctypes.c_void_p]
+user32.SetClipboardData.restype = ctypes.c_void_p
+user32.CloseClipboard.argtypes = []
+user32.CloseClipboard.restype = wintypes.BOOL
+
 
 def set_clipboard_text(text: str) -> bool:
     """Copy text to Windows clipboard via Win32. Returns True on success.
