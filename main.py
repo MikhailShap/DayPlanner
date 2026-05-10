@@ -406,13 +406,19 @@ def main(page: ft.Page):
     def find_task_by_id(task_id):
         return task_id_map.get(task_id)
 
-    def _close_dialog(dlg):
-        dlg.open = False
+    def _open_dialog(dlg):
+        # Flet 0.80+: use page.show_dialog instead of overlay.append + dlg.open
         try:
-            page.overlay.remove(dlg)
-        except ValueError:
-            pass
-        page.update()
+            page.show_dialog(dlg)
+        except Exception:
+            log.exception("_open_dialog failed for %r", type(dlg).__name__)
+
+    def _close_dialog(dlg=None):
+        # Flet 0.80+: pop the topmost dialog. Old dlg.open=False has no effect.
+        try:
+            page.pop_dialog()
+        except Exception:
+            log.exception("_close_dialog failed")
 
     def _show_snack(text, color=None):
         snack = ft.SnackBar(
@@ -477,9 +483,7 @@ def main(page: ft.Page):
             actions=[ft.TextButton("Закрыть", on_click=lambda ev: _close_dialog(dlg))],
         )
 
-        page.overlay.append(dlg)
-        dlg.open = True
-        page.update()
+        _open_dialog(dlg)
 
     def save_all_tasks():
         tasks = [
@@ -733,9 +737,7 @@ def main(page: ft.Page):
             ],
         )
 
-        page.overlay.append(dlg)
-        dlg.open = True
-        page.update()
+        _open_dialog(dlg)
 
     # ── opacity / lock ────────────────────────────────────────────────────────
 
@@ -922,9 +924,7 @@ def main(page: ft.Page):
             ],
         )
 
-        page.overlay.append(dlg)
-        dlg.open = True
-        page.update()
+        _open_dialog(dlg)
 
     def copy_task(task_info):
         if is_locked[0]:
@@ -1314,9 +1314,7 @@ def main(page: ft.Page):
             ],
         )
 
-        page.overlay.append(dlg)
-        dlg.open = True
-        page.update()
+        _open_dialog(dlg)
 
     def delete_tab(index):
         if is_locked[0] or len(tabs_list) <= 1:
@@ -1356,9 +1354,7 @@ def main(page: ft.Page):
             ],
         )
 
-        page.overlay.append(dlg)
-        dlg.open = True
-        page.update()
+        _open_dialog(dlg)
 
     def rebuild_tabs():
         tabs_row_ref[0].controls.clear()
