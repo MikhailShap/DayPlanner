@@ -187,12 +187,12 @@ tray_icon = [None]
 page_ref = [None]
 app_visible = [True]
 
-@lru_cache(maxsize=32)
+@lru_cache(maxsize=256)
 def get_bg_color(opacity):
     alpha = hex(int(opacity * 255))[2:].zfill(2).upper()
     return f"#{alpha}181818"
 
-@lru_cache(maxsize=32)
+@lru_cache(maxsize=256)
 def get_card_color(opacity):
     alpha = hex(int(opacity * 255))[2:].zfill(2).upper()
     return f"#{alpha}252525"
@@ -870,19 +870,27 @@ def main(page: ft.Page):
         for task_info in tasks_data_list:
             task_info["container"].bgcolor = card
 
-    last_opacity_update = [0]
+    last_opacity_update = [0.0]
 
     def on_opacity_change(e):
         nonlocal opacity_value
         if is_locked[0]:
             return
+        # 60fps cap — drop events that arrive within 16ms of the previous one.
+        # Lets the slider feel smooth without hammering page.update().
         import time
         now = time.time()
-        if now - last_opacity_update[0] < 0.1:
+        if now - last_opacity_update[0] < 0.016:
+            return
+
+        # 0.01 resolution — was 0.1 which gave only 8 discrete steps and
+        # made the slider feel "sticky".
+        val = round(e.control.value, 2)
+        if val == opacity_value:
             return
         last_opacity_update[0] = now
+        opacity_value = val
 
-        opacity_value = round(e.control.value, 1)
         bg = get_bg_color(opacity_value)
         card = get_card_color(opacity_value)
         main_container.current.bgcolor = bg
@@ -890,9 +898,15 @@ def main(page: ft.Page):
         for task_info in tasks_data_list:
             task_info["container"].bgcolor = card
 
+        page.update()
+
+    def on_opacity_change_end(e):
+        # Save settings only when the user releases the slider, not on every
+        # tick. Saver was rescheduling its threading.Timer ~10x/sec before.
+        if is_locked[0]:
+            return
         settings["opacity"] = opacity_value
         saver.save_settings_deferred(settings.copy())
-        page.update()
 
     def close_app(e):
         if is_locked[0]:
@@ -1734,6 +1748,7 @@ def main(page: ft.Page):
                         active_color=ACCENT_COLOR,
                         inactive_color="#333333",
                         on_change=on_opacity_change,
+                        on_change_end=on_opacity_change_end,
                         expand=True,
                     ),
                 ],
