@@ -249,27 +249,33 @@ def main(page: ft.Page):
         if tray_icon[0]:
             threading.Thread(target=tray_icon[0].run, daemon=True).start()
 
-    def hide_from_taskbar():
-        __import__('time').sleep(0.3)
-        hwnd = get_window_handle("DayPlanner")
-        if hwnd:
-            style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            style = (style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
-            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
-            user32.ShowWindow(hwnd, 0)
-            user32.ShowWindow(hwnd, 5)
-
-    threading.Thread(target=hide_from_taskbar, daemon=True).start()
-
     settings = load_settings()
     tasks_data = load_tasks()
 
-    page.window.width = 380
-    page.window.height = 650
+    # Restore window size from settings (was hard-coded before)
+    saved_w = settings.get("window_width", 380)
+    saved_h = settings.get("window_height", 650)
+    try:
+        page.window.width = max(320, min(2000, float(saved_w)))
+        page.window.height = max(400, min(2000, float(saved_h)))
+    except (TypeError, ValueError):
+        page.window.width = 380
+        page.window.height = 650
 
+    # Restore window position with off-screen clamping
     if "window_x" in settings and "window_y" in settings:
-        page.window.left = settings["window_x"]
-        page.window.top = settings["window_y"]
+        try:
+            x = float(settings["window_x"])
+            y = float(settings["window_y"])
+            screen_w = user32.GetSystemMetrics(0)
+            screen_h = user32.GetSystemMetrics(1)
+            # Keep at least 100px of window visible
+            x = max(-page.window.width + 100, min(x, screen_w - 100))
+            y = max(0, min(y, screen_h - 100))
+            page.window.left = x
+            page.window.top = y
+        except (TypeError, ValueError):
+            page.window.center()
     else:
         page.window.center()
 
@@ -279,10 +285,38 @@ def main(page: ft.Page):
     LOCKED_OPACITY = 0.5
 
     opacity_value = settings.get("opacity", 0.9)
-    is_locked = [False]
+    is_locked = [bool(settings.get("is_locked", False))]
     hwnd = [None]
     hotkey_thread_running = [True]
     dragging_task_id = [None]
+
+    # Apply locked window flag early so the window comes up on top if it was locked
+    page.window.always_on_top = is_locked[0]
+
+    def hide_from_taskbar():
+        # Poll until the window handle exists, then apply ToolWindow style
+        # (so the icon disappears from the taskbar). Also re-applies
+        # click-through if the app was launched in locked state.
+        import time as _t
+        deadline = _t.time() + 5.0
+        win = 0
+        while _t.time() < deadline:
+            win = get_window_handle("DayPlanner")
+            if win:
+                break
+            _t.sleep(0.05)
+        if not win:
+            return
+        style = user32.GetWindowLongW(win, GWL_EXSTYLE)
+        style = (style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
+        user32.SetWindowLongW(win, GWL_EXSTYLE, style)
+        user32.ShowWindow(win, 0)
+        user32.ShowWindow(win, 5)
+        if is_locked[0]:
+            set_click_through(win, True)
+        hwnd[0] = win
+
+    threading.Thread(target=hide_from_taskbar, daemon=True).start()
 
     tabs_list = tasks_data.get("tabs", [{"name": "Главная", "tasks": []}])
     active_tab_raw = tasks_data.get("active_tab", 0)
@@ -295,27 +329,17 @@ def main(page: ft.Page):
     main_container = ft.Ref[ft.Container]()
     lock_button = ft.Ref[ft.IconButton]()
     close_button = ft.Ref[ft.IconButton]()
+    settings_button = ft.Ref[ft.IconButton]()
     add_button = ft.Ref[ft.IconButton]()
     opacity_slider = ft.Ref[ft.Slider]()
     input_field = ft.Ref[ft.TextField]()
     tabs_row_ref = [None]
     tasks_column_ref = [None]
 
-    # File picker for attachments — added to overlay once
-    pending_task_info = [None]
-
-    def on_file_picked(e: ft.FilePickerResultEvent):
-        if not e.files or not pending_task_info[0]:
-            return
-        task_info = pending_task_info[0]
-        pending_task_info[0] = None
-        for f in e.files:
-            task_info["attachments"].append({"type": "file", "name": f.name, "path": f.path})
-        _rebuild_attachment_chips(task_info)
-        save_all_tasks()
-        page.update()
-
-    file_picker = ft.FilePicker(on_result=on_file_picked)
+    # File picker for attachments — added to overlay once.
+    # Each pick_file() rebinds on_result to a closure for the current task,
+    # avoiding race conditions when multiple attach dialogs are opened.
+    file_picker = ft.FilePicker()
     page.overlay.append(file_picker)
 
     # ── helpers ──────────────────────────────────────────────────────────────
@@ -341,6 +365,61 @@ def main(page: ft.Page):
             snack.content.color = color
         page.overlay.append(snack)
         snack.open = True
+        page.update()
+
+    def show_settings_dialog(e=None):
+        if is_locked[0]:
+            return
+
+        autostart_switch = ft.Switch(
+            value=is_autostart_enabled(),
+            active_color=ACCENT_COLOR,
+        )
+
+        def on_autostart_toggle(ev):
+            set_autostart(bool(autostart_switch.value))
+
+        autostart_switch.on_change = on_autostart_toggle
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Настройки", color=TEXT_COLOR),
+            bgcolor="#252525",
+            content=ft.Container(
+                width=320,
+                content=ft.Column(
+                    controls=[
+                        ft.Row(
+                            controls=[
+                                ft.Icon(ft.Icons.LAUNCH_ROUNDED, color="#9B7FF0", size=18),
+                                ft.Text(
+                                    "Автозапуск с Windows",
+                                    color=TEXT_COLOR, size=13, expand=True,
+                                ),
+                                autostart_switch,
+                            ],
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                        ft.Text(
+                            "Программа будет запускаться вместе с Windows и сворачиваться в трей.",
+                            color="#888888", size=11,
+                        ),
+                        ft.Divider(color="#3A3A3A", height=18),
+                        ft.Text("Горячие клавиши:", color="#999999", size=12,
+                                weight=ft.FontWeight.W_500),
+                        ft.Text("Ctrl+Shift+L  —  режим замка (поверх всех / клик-сквозь)",
+                                color="#888888", size=11),
+                        ft.Text("Enter  —  добавить задачу", color="#888888", size=11),
+                    ],
+                    spacing=8,
+                    tight=True,
+                ),
+            ),
+            actions=[ft.TextButton("Закрыть", on_click=lambda ev: _close_dialog(dlg))],
+        )
+
+        page.overlay.append(dlg)
+        dlg.open = True
         page.update()
 
     def save_all_tasks():
@@ -376,6 +455,15 @@ def main(page: ft.Page):
         save_all_tasks()
         page.update()
 
+    IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico")
+
+    def _is_image_attachment(att):
+        if att.get("type") != "file":
+            return False
+        name = (att.get("name") or "").lower()
+        path = att.get("path", "")
+        return name.endswith(IMAGE_EXTS) and bool(path) and os.path.exists(path)
+
     def _rebuild_attachment_chips(task_info):
         attachments = task_info.get("attachments", [])
         row = task_info.get("attachments_row")
@@ -386,28 +474,49 @@ def main(page: ft.Page):
         row.controls.clear()
         for att in attachments:
             is_file = att["type"] == "file"
-            icon = ft.Icons.ATTACH_FILE_ROUNDED if is_file else ft.Icons.LINK_ROUNDED
             name = att.get("name") or att.get("url", "Ссылка")
             display = name[:22] + ("…" if len(name) > 22 else "")
+
+            if _is_image_attachment(att):
+                leading = ft.Container(
+                    content=ft.Image(
+                        src=att["path"],
+                        width=14,
+                        height=14,
+                        fit=ft.ImageFit.COVER,
+                        error_content=ft.Icon(
+                            ft.Icons.BROKEN_IMAGE_OUTLINED, size=11, color="#9B7FF0"
+                        ),
+                    ),
+                    width=14,
+                    height=14,
+                    border_radius=3,
+                    clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                )
+            else:
+                icon = ft.Icons.ATTACH_FILE_ROUNDED if is_file else ft.Icons.LINK_ROUNDED
+                leading = ft.Icon(icon, size=11, color="#9B7FF0")
 
             chip = ft.Container(
                 content=ft.Row(
                     controls=[
-                        ft.Icon(icon, size=11, color="#9B7FF0"),
+                        leading,
                         ft.Text(display, size=10, color="#9B7FF0"),
                         ft.GestureDetector(
                             content=ft.Icon(ft.Icons.CLOSE, size=10, color="#666666"),
                             on_tap=lambda e, a=att, ti=task_info: remove_attachment(ti, a),
                         ),
                     ],
-                    spacing=3,
+                    spacing=4,
                     tight=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
                 padding=ft.Padding(6, 3, 6, 3),
                 margin=ft.Margin(0, 0, 4, 0),
                 border_radius=12,
                 bgcolor="#2A2040",
                 on_click=lambda e, a=att: open_attachment(a),
+                tooltip=name,
             )
             row.controls.append(chip)
 
@@ -453,7 +562,33 @@ def main(page: ft.Page):
 
         def pick_file(e):
             _close_dialog(dlg)
-            pending_task_info[0] = task_info
+
+            def _on_result(res: ft.FilePickerResultEvent):
+                if not res.files:
+                    return
+                added = 0
+                skipped = 0
+                for f in res.files:
+                    if not f.path:
+                        skipped += 1
+                        continue
+                    task_info["attachments"].append({
+                        "type": "file",
+                        "name": f.name,
+                        "path": f.path,
+                    })
+                    added += 1
+                if added:
+                    _rebuild_attachment_chips(task_info)
+                    save_all_tasks()
+                if skipped:
+                    _show_snack(
+                        f"Пропущено {skipped} файл(ов): нет локального пути (облако?)",
+                        "#FF6B6B",
+                    )
+                page.update()
+
+            file_picker.on_result = _on_result
             file_picker.pick_files(allow_multiple=True)
 
         def cancel(e):
@@ -555,6 +690,9 @@ def main(page: ft.Page):
         locked = is_locked[0]
         close_button.current.disabled = locked
         close_button.current.icon_color = DISABLED_COLOR if locked else "#666666"
+        if settings_button.current is not None:
+            settings_button.current.disabled = locked
+            settings_button.current.icon_color = DISABLED_COLOR if locked else "#666666"
         add_button.current.disabled = locked
         add_button.current.icon_color = DISABLED_COLOR if locked else ACCENT_COLOR
         opacity_slider.current.disabled = locked
@@ -684,17 +822,18 @@ def main(page: ft.Page):
     def copy_task(task_info):
         if is_locked[0]:
             return
-        import subprocess
-        process = subprocess.Popen(['clip'], stdin=subprocess.PIPE, shell=True)
-        process.communicate(task_info["text"].value.encode('utf-16-le'))
-        _show_snack("Скопировано!")
+        try:
+            page.set_clipboard(task_info["text"].value)
+            _show_snack("Скопировано!")
+        except Exception:
+            _show_snack("Не удалось скопировать", "#FF6B6B")
 
     # ── drag & drop ───────────────────────────────────────────────────────────
 
     def reset_all_styles():
         for task_info in tasks_data_list:
             task_info["container"].opacity = 1.0
-            task_info["container"].margin = ft.Margin(0, 0, 0, 8)
+            task_info["container"].margin = ft.Margin(0, 0, 0, 6)
 
     def drag_start(task_id):
         if is_locked[0]:
@@ -719,11 +858,11 @@ def main(page: ft.Page):
             return
         for t in tasks_data_list:
             if t != src_task:
-                t["container"].margin = ft.Margin(0, 0, 0, 8)
+                t["container"].margin = ft.Margin(0, 0, 0, 6)
         if src_index < target_index:
-            target_task["container"].margin = ft.Margin(0, 0, 0, 30)
+            target_task["container"].margin = ft.Margin(0, 0, 0, 28)
         else:
-            target_task["container"].margin = ft.Margin(0, 22, 0, 8)
+            target_task["container"].margin = ft.Margin(0, 22, 0, 6)
         page.update()
 
     def drag_leave(e, target_task_id):
@@ -732,7 +871,7 @@ def main(page: ft.Page):
         target_task = find_task_by_id(target_task_id)
         src_task = find_task_by_id(dragging_task_id[0])
         if target_task and target_task != src_task:
-            target_task["container"].margin = ft.Margin(0, 0, 0, 8)
+            target_task["container"].margin = ft.Margin(0, 0, 0, 6)
         page.update()
 
     def drag_accept_task(e, target_task_id):
@@ -1171,6 +1310,15 @@ def main(page: ft.Page):
                     ft.Row(
                         controls=[
                             ft.IconButton(
+                                ref=settings_button,
+                                icon=ft.Icons.SETTINGS_OUTLINED,
+                                icon_size=18,
+                                icon_color=DISABLED_COLOR if is_locked[0] else "#666666",
+                                disabled=is_locked[0],
+                                on_click=show_settings_dialog,
+                                tooltip="Настройки",
+                            ),
+                            ft.IconButton(
                                 ref=lock_button,
                                 icon=ft.Icons.LOCK_ROUNDED if is_locked[0] else ft.Icons.LOCK_OPEN_ROUNDED,
                                 icon_size=18,
@@ -1338,6 +1486,18 @@ def main(page: ft.Page):
     )
 
     page.add(main_layout)
+
+    # If lock state was restored from settings, apply locked styling/disabled
+    # flags to all controls that aren't already configured with is_locked[0]
+    # at construction time (add_button, opacity_slider, input_field, etc).
+    if is_locked[0]:
+        update_ui_state()
+        apply_locked_style()
+        rebuild_tabs()
+        # Wrap header in plain Container (no WindowDragArea) so locked window
+        # cannot be dragged, mirroring toggle_lock() behavior.
+        update_header()
+        page.update()
 
 
 if __name__ == "__main__":
