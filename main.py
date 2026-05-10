@@ -105,6 +105,56 @@ VK_L = 0x4C
 HOTKEY_ID = 1
 
 user32 = ctypes.windll.user32
+kernel32 = ctypes.windll.kernel32
+
+# Win32 clipboard constants
+GMEM_MOVEABLE = 0x0002
+CF_UNICODETEXT = 13
+
+
+def set_clipboard_text(text: str) -> bool:
+    """Copy text to Windows clipboard via Win32. Returns True on success.
+    Avoids Flet's async Clipboard service (less moving parts, works
+    even before the page is fully mounted)."""
+    if text is None:
+        text = ""
+    encoded = text.encode("utf-16-le") + b"\x00\x00"
+    h_mem = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(encoded))
+    if not h_mem:
+        log.error("clipboard: GlobalAlloc failed")
+        return False
+    p_mem = kernel32.GlobalLock(h_mem)
+    if not p_mem:
+        kernel32.GlobalFree(h_mem)
+        log.error("clipboard: GlobalLock failed")
+        return False
+    try:
+        ctypes.memmove(p_mem, encoded, len(encoded))
+    finally:
+        kernel32.GlobalUnlock(h_mem)
+
+    # OpenClipboard sometimes fails if another process holds it; retry briefly.
+    import time as _t
+    opened = False
+    for _ in range(5):
+        if user32.OpenClipboard(0):
+            opened = True
+            break
+        _t.sleep(0.02)
+    if not opened:
+        kernel32.GlobalFree(h_mem)
+        log.error("clipboard: OpenClipboard failed after retries")
+        return False
+    try:
+        user32.EmptyClipboard()
+        # Ownership of h_mem transfers to the clipboard on success — don't free.
+        if not user32.SetClipboardData(CF_UNICODETEXT, h_mem):
+            kernel32.GlobalFree(h_mem)
+            log.error("clipboard: SetClipboardData failed")
+            return False
+    finally:
+        user32.CloseClipboard()
+    return True
 
 tray_icon = [None]
 page_ref = [None]
@@ -929,11 +979,11 @@ def main(page: ft.Page):
     def copy_task(task_info):
         if is_locked[0]:
             return
-        try:
-            page.set_clipboard(task_info["text"].value)
+        text = task_info["text"].value or ""
+        if set_clipboard_text(text):
             _show_snack("Скопировано!")
-        except Exception:
-            _show_snack("Не удалось скопировать", "#FF6B6B")
+        else:
+            _show_snack("Не удалось скопировать, см. dayplanner.log", "#FF6B6B")
 
     # ── drag & drop ───────────────────────────────────────────────────────────
 
