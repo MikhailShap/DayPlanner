@@ -562,36 +562,36 @@ def main(page: ft.Page):
             save_all_tasks()
             _close_dialog(dlg)
 
-        def pick_file(e):
+        async def pick_file(e):
             _close_dialog(dlg)
-
-            def _on_result(res: ft.FilePickerResultEvent):
-                if not res.files:
-                    return
-                added = 0
-                skipped = 0
-                for f in res.files:
-                    if not f.path:
-                        skipped += 1
-                        continue
-                    task_info["attachments"].append({
-                        "type": "file",
-                        "name": f.name,
-                        "path": f.path,
-                    })
-                    added += 1
-                if added:
-                    _rebuild_attachment_chips(task_info)
-                    save_all_tasks()
-                if skipped:
-                    _show_snack(
-                        f"Пропущено {skipped} файл(ов): нет локального пути (облако?)",
-                        "#FF6B6B",
-                    )
-                page.update()
-
-            file_picker.on_result = _on_result
-            file_picker.pick_files(allow_multiple=True)
+            try:
+                files = await file_picker.pick_files(allow_multiple=True)
+            except Exception as ex:
+                _show_snack(f"Ошибка диалога: {ex}", "#FF6B6B")
+                return
+            if not files:
+                return
+            added = 0
+            skipped = 0
+            for f in files:
+                if not f.path:
+                    skipped += 1
+                    continue
+                task_info["attachments"].append({
+                    "type": "file",
+                    "name": f.name,
+                    "path": f.path,
+                })
+                added += 1
+            if added:
+                _rebuild_attachment_chips(task_info)
+                save_all_tasks()
+            if skipped:
+                _show_snack(
+                    f"Пропущено {skipped} файл(ов): нет локального пути (облако?)",
+                    "#FF6B6B",
+                )
+            page.update()
 
         def cancel(e):
             _close_dialog(dlg)
