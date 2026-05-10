@@ -542,7 +542,7 @@ def main(page: ft.Page):
                         src=att["path"],
                         width=14,
                         height=14,
-                        fit=ft.ImageFit.COVER,
+                        fit=ft.BoxFit.COVER,
                         error_content=ft.Icon(
                             ft.Icons.BROKEN_IMAGE_OUTLINED, size=11, color="#9B7FF0"
                         ),
