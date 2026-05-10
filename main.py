@@ -461,6 +461,7 @@ def main(page: ft.Page):
     add_button = ft.Ref[ft.IconButton]()
     opacity_slider = ft.Ref[ft.Slider]()
     input_field = ft.Ref[ft.TextField]()
+    content_stack = [None]  # set up below; modal is added/removed as a Stack child
     tabs_row_ref = [None]
     tasks_column_ref = [None]
 
@@ -477,14 +478,16 @@ def main(page: ft.Page):
     def find_task_by_id(task_id):
         return task_id_map.get(task_id)
 
-    # Custom in-window modal. Flet 0.80's AlertDialog sizes itself to the
-    # screen, not to our small frameless 380px window — it overflowed and
-    # rendered as a "second window". A plain Container in page.overlay stays
-    # within window bounds and looks consistent across all dialogs.
+    # Custom in-window modal. Lives as a layer on the main Stack so it
+    # follows window visibility (page.overlay leaked the modal outside
+    # the OS window in Flet 0.80 — modal stayed visible after closing).
     modal_holder = [None]
 
     def _show_modal(title, body, actions):
         _close_modal()
+        if content_stack[0] is None:
+            log.error("_show_modal: content_stack not ready")
+            return None
         panel = ft.Container(
             width=320,
             bgcolor="#252525",
@@ -520,7 +523,11 @@ def main(page: ft.Page):
             content=panel,
         )
         modal_holder[0] = overlay
-        page.overlay.append(overlay)
+        content_stack[0].controls.append(overlay)
+        try:
+            content_stack[0].update()
+        except Exception:
+            pass
         page.update()
         return overlay
 
@@ -529,10 +536,15 @@ def main(page: ft.Page):
         if overlay is None:
             return
         modal_holder[0] = None
-        try:
-            page.overlay.remove(overlay)
-        except ValueError:
-            pass
+        if content_stack[0] is not None:
+            try:
+                content_stack[0].controls.remove(overlay)
+            except ValueError:
+                pass
+            try:
+                content_stack[0].update()
+            except Exception:
+                pass
         page.update()
 
     def _show_snack(text, color=None):
@@ -877,6 +889,8 @@ def main(page: ft.Page):
     def close_app(e):
         if is_locked[0]:
             return
+        # Make sure no modal stays floating after the window is hidden.
+        _close_modal()
         settings["window_x"] = page.window.left
         settings["window_y"] = page.window.top
         settings["window_width"] = page.window.width
@@ -1653,6 +1667,14 @@ def main(page: ft.Page):
         controls=[header_drop, tabs_container, slider_drop, tasks_list, input_drop, hint_drop],
     )
 
+    # Stack lets us drop the modal as an overlay layer that lives INSIDE
+    # main_layout's render tree (and therefore the window). page.overlay
+    # was leaking the modal outside the window in Flet 0.80.
+    content_stack[0] = ft.Stack(
+        controls=[ui_column],
+        expand=True,
+    )
+
     main_layout = ft.Container(
         ref=main_container,
         expand=True,
@@ -1665,7 +1687,7 @@ def main(page: ft.Page):
             ft.BorderSide(1, "#3A3A3A"),
         ),
         clip_behavior=ft.ClipBehavior.HARD_EDGE,
-        content=ui_column,
+        content=content_stack[0],
     )
 
     page.add(main_layout)
