@@ -42,7 +42,13 @@ BASE_PATH = get_base_path()
 TASKS_FILE = os.path.join(BASE_PATH, "tasks.json")
 SETTINGS_FILE = os.path.join(BASE_PATH, "settings.json")
 LOG_FILE = os.path.join(BASE_PATH, "dayplanner.log")
+ATTACHMENTS_DIR = os.path.join(BASE_PATH, "attachments")
 ICON_FILE = "icon.ico"
+
+try:
+    os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
+except Exception:
+    pass
 
 # ── Logging ─────────────────────────────────────────────────────────────────
 # Log file lives next to the .exe. Rotates at 512 KB, keeps 2 backups so the
@@ -594,6 +600,8 @@ def main(page: ft.Page):
                 ft.Text("Горячие клавиши:", color="#999999", size=12,
                         weight=ft.FontWeight.W_500),
                 ft.Text("Ctrl+Shift+L  —  режим замка (поверх всех / клик-сквозь)",
+                        color="#888888", size=11),
+                ft.Text("Ctrl+V  —  прикрепить скриншот / файл из буфера",
                         color="#888888", size=11),
                 ft.Text("Enter  —  добавить задачу", color="#888888", size=11),
             ],
@@ -1336,15 +1344,160 @@ def main(page: ft.Page):
             on_accept=lambda e: drag_accept_task(e, task_id),
         )
 
+    # ── pending attachments (Ctrl+V into the input field) ────────────────────
+
+    pending_attachments_list = []
+    pending_chips_row = ft.Row(
+        controls=[], spacing=4, wrap=False, scroll=ft.ScrollMode.AUTO,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+    pending_chips_container = ft.Container(
+        content=pending_chips_row,
+        padding=ft.Padding(25, 0, 25, 4),
+        visible=False,
+    )
+
+    def _remove_pending(att):
+        try:
+            pending_attachments_list.remove(att)
+        except ValueError:
+            pass
+        _rebuild_pending_chips()
+
+    def _rebuild_pending_chips():
+        pending_chips_row.controls.clear()
+        for att in pending_attachments_list:
+            name = att.get("name") or att.get("url", "Файл")
+            display = name[:24] + ("…" if len(name) > 24 else "")
+
+            is_image = False
+            if att.get("type") == "file":
+                fn = (att.get("name") or "").lower()
+                if fn.endswith(IMAGE_EXTS) and att.get("path") and os.path.exists(att["path"]):
+                    is_image = True
+
+            if is_image:
+                leading = ft.Image(
+                    src=att["path"], width=16, height=16,
+                    fit=ft.BoxFit.COVER, border_radius=3,
+                )
+            else:
+                icon_name = (
+                    ft.Icons.ATTACH_FILE_ROUNDED
+                    if att.get("type") == "file"
+                    else ft.Icons.LINK_ROUNDED
+                )
+                leading = ft.Icon(icon_name, size=12, color="#9B7FF0")
+
+            chip = ft.Container(
+                content=ft.Row(
+                    controls=[
+                        leading,
+                        ft.Text(display, size=10, color="#9B7FF0"),
+                        ft.GestureDetector(
+                            content=ft.Icon(ft.Icons.CLOSE, size=10, color="#888888"),
+                            on_tap=lambda e, a=att: _remove_pending(a),
+                        ),
+                    ],
+                    spacing=4,
+                    tight=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                padding=ft.Padding(6, 3, 6, 3),
+                margin=ft.Margin(0, 0, 4, 0),
+                border_radius=12,
+                bgcolor="#2A2040",
+                tooltip=name,
+            )
+            pending_chips_row.controls.append(chip)
+
+        pending_chips_container.visible = len(pending_attachments_list) > 0
+        try:
+            pending_chips_container.update()
+            pending_chips_row.update()
+        except Exception:
+            pass
+
+    def _save_clipboard_image(img):
+        """Save a PIL image from the clipboard. Returns (path, name) or None."""
+        import time as _t
+        ts = _t.strftime("%Y%m%d_%H%M%S")
+        ms = int((_t.time() * 1000) % 1000)
+        name = f"clipboard_{ts}_{ms:03d}.png"
+        path = os.path.join(ATTACHMENTS_DIR, name)
+        try:
+            img.save(path, "PNG")
+            return path, name
+        except Exception:
+            log.exception("save clipboard image failed")
+            return None
+
+    def _paste_clipboard_attachment():
+        """Ctrl+V: read clipboard, attach image/files to the pending list.
+        Text paste keeps default behavior (TextField handles it)."""
+        if is_locked[0]:
+            return
+        if modal_holder[0] is not None:
+            return  # modal open — don't interfere
+        try:
+            from PIL import ImageGrab
+            clip = ImageGrab.grabclipboard()
+        except Exception:
+            log.exception("paste: grabclipboard failed")
+            return
+        if clip is None:
+            return  # text-only or empty — let TextField handle it
+        if isinstance(clip, list):
+            # CF_HDROP — list of file paths
+            added = 0
+            for raw in clip:
+                p = str(raw)
+                if not p:
+                    continue
+                pending_attachments_list.append({
+                    "type": "file",
+                    "name": os.path.basename(p),
+                    "path": p,
+                })
+                added += 1
+            if added:
+                _rebuild_pending_chips()
+                _show_snack(f"Прикреплено файлов: {added}")
+                log.info("paste: %d file(s) from clipboard", added)
+        else:
+            # PIL Image — screenshot or copied image
+            result = _save_clipboard_image(clip)
+            if result is None:
+                _show_snack("Не удалось сохранить скриншот", "#FF6B6B")
+                return
+            path, name = result
+            pending_attachments_list.append({
+                "type": "file", "name": name, "path": path,
+            })
+            _rebuild_pending_chips()
+            _show_snack("Скриншот прикреплён")
+            log.info("paste: clipboard image saved as %s", name)
+
+    def on_keyboard(e):
+        # Ctrl+V (no Shift, no Alt) — try to grab image/files from clipboard.
+        if e.ctrl and not e.shift and not e.alt and (e.key or "").upper() == "V":
+            _paste_clipboard_attachment()
+
+    page.on_keyboard_event = on_keyboard
+
     def add_task(e):
         if is_locked[0]:
             return
-        task_text = input_field.current.value.strip()
-        if not task_text:
+        task_text = (input_field.current.value or "").strip()
+        if not task_text and not pending_attachments_list:
             return
-        new_task = create_task_item(task_text, False)
+        if not task_text and pending_attachments_list:
+            task_text = "📎 Вложение"
+        new_task = create_task_item(task_text, False, list(pending_attachments_list))
         tasks_column_ref[0].controls.append(new_task)
         input_field.current.value = ""
+        pending_attachments_list.clear()
+        _rebuild_pending_chips()
         save_all_tasks()
         page.update()
 
@@ -1664,7 +1817,10 @@ def main(page: ft.Page):
 
     ui_column = ft.Column(
         spacing=0, expand=True,
-        controls=[header_drop, tabs_container, slider_drop, tasks_list, input_drop, hint_drop],
+        controls=[
+            header_drop, tabs_container, slider_drop, tasks_list,
+            pending_chips_container, input_drop, hint_drop,
+        ],
     )
 
     # Stack lets us drop the modal as an overlay layer that lives INSIDE
