@@ -7,6 +7,8 @@ from ctypes import wintypes
 import threading
 import winreg
 import webbrowser
+import logging
+from logging.handlers import RotatingFileHandler
 from functools import lru_cache
 
 # Single instance check
@@ -39,7 +41,57 @@ def get_base_path():
 BASE_PATH = get_base_path()
 TASKS_FILE = os.path.join(BASE_PATH, "tasks.json")
 SETTINGS_FILE = os.path.join(BASE_PATH, "settings.json")
+LOG_FILE = os.path.join(BASE_PATH, "dayplanner.log")
 ICON_FILE = "icon.ico"
+
+# ── Logging ─────────────────────────────────────────────────────────────────
+# Log file lives next to the .exe. Rotates at 512 KB, keeps 2 backups so the
+# disk impact stays small. windowed exe has no console, so this is the only
+# way to see what happens at runtime.
+_log_formatter = logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(threadName)s: %(message)s"
+)
+log = logging.getLogger("dayplanner")
+log.setLevel(logging.INFO)
+try:
+    _file_handler = RotatingFileHandler(
+        LOG_FILE, maxBytes=512 * 1024, backupCount=2, encoding="utf-8"
+    )
+    _file_handler.setFormatter(_log_formatter)
+    log.addHandler(_file_handler)
+except Exception:
+    pass
+
+# Also log to stderr if a console is attached (dev runs from python main.py)
+_stream_handler = logging.StreamHandler()
+_stream_handler.setFormatter(_log_formatter)
+log.addHandler(_stream_handler)
+
+
+def _log_uncaught(exc_type, exc_value, exc_tb):
+    log.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
+
+
+sys.excepthook = _log_uncaught
+
+
+def _log_thread_exc(args):
+    log.error(
+        "Uncaught exception in thread %s",
+        args.thread.name if args.thread else "?",
+        exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+    )
+
+
+threading.excepthook = _log_thread_exc
+
+log.info("=" * 50)
+log.info(
+    "DayPlanner starting | frozen=%s | base=%s | python=%s",
+    bool(getattr(sys, "frozen", False)),
+    BASE_PATH,
+    sys.version.split()[0],
+)
 
 GWL_EXSTYLE = -20
 WS_EX_LAYERED = 0x80000
@@ -88,7 +140,7 @@ def load_tasks():
                     return {"tabs": [{"name": "Главная", "tasks": data}], "active_tab": 0}
                 return data
         except Exception:
-            pass
+            log.exception("load_tasks failed")
     return {"tabs": [{"name": "Главная", "tasks": []}], "active_tab": 0}
 
 def save_tasks(data):
@@ -96,7 +148,7 @@ def save_tasks(data):
         with open(TASKS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, separators=(',', ':'))
     except Exception:
-        pass
+        log.exception("save_tasks failed")
 
 def load_settings():
     if os.path.exists(SETTINGS_FILE):
@@ -104,7 +156,7 @@ def load_settings():
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
-            pass
+            log.exception("load_settings failed")
     return {}
 
 def save_settings(settings):
@@ -112,7 +164,7 @@ def save_settings(settings):
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump(settings, f, ensure_ascii=False, separators=(',', ':'))
     except Exception:
-        pass
+        log.exception("save_settings failed")
 
 def is_autostart_enabled():
     try:
@@ -132,14 +184,18 @@ def set_autostart(enable):
         if enable:
             exe_path = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(sys.argv[0])
             winreg.SetValueEx(key, "DayPlanner", 0, winreg.REG_SZ, f'"{exe_path}"')
+            log.info("autostart enabled (%s)", exe_path)
         else:
             try:
                 winreg.DeleteValue(key, "DayPlanner")
-            except Exception:
+                log.info("autostart disabled")
+            except FileNotFoundError:
                 pass
+            except Exception:
+                log.exception("autostart DeleteValue failed")
         winreg.CloseKey(key)
     except Exception:
-        pass
+        log.exception("set_autostart failed")
 
 class DeferredSaver:
     def __init__(self, delay=1.0):
@@ -236,6 +292,7 @@ def create_tray_icon():
 
 
 def main(page: ft.Page):
+    log.info("main(): page initialized")
     page.title = "DayPlanner"
     page.bgcolor = ft.Colors.TRANSPARENT
     page.window.bgcolor = ft.Colors.TRANSPARENT
@@ -562,36 +619,65 @@ def main(page: ft.Page):
             save_all_tasks()
             _close_dialog(dlg)
 
-        async def pick_file(e):
-            _close_dialog(dlg)
+        async def _do_pick():
+            log.info("pick_file: opening native picker")
             try:
                 files = await file_picker.pick_files(allow_multiple=True)
-            except Exception as ex:
-                _show_snack(f"Ошибка диалога: {ex}", "#FF6B6B")
+            except Exception:
+                log.exception("file_picker.pick_files failed")
+                _show_snack("Ошибка выбора файла, см. dayplanner.log", "#FF6B6B")
                 return
+
+            count = len(files) if files else 0
+            log.info("pick_file: native picker returned %d file(s)", count)
             if not files:
                 return
+
             added = 0
             skipped = 0
             for f in files:
-                if not f.path:
+                fp = getattr(f, "path", None)
+                fn = getattr(f, "name", "")
+                log.info("pick_file: file name=%r path=%r", fn, fp)
+                if not fp:
                     skipped += 1
                     continue
-                task_info["attachments"].append({
-                    "type": "file",
-                    "name": f.name,
-                    "path": f.path,
-                })
-                added += 1
-            if added:
-                _rebuild_attachment_chips(task_info)
-                save_all_tasks()
-            if skipped:
-                _show_snack(
-                    f"Пропущено {skipped} файл(ов): нет локального пути (облако?)",
-                    "#FF6B6B",
-                )
-            page.update()
+                try:
+                    task_info["attachments"].append({
+                        "type": "file",
+                        "name": fn,
+                        "path": fp,
+                    })
+                    added += 1
+                except Exception:
+                    log.exception("pick_file: append attachment failed")
+
+            try:
+                if added:
+                    _rebuild_attachment_chips(task_info)
+                    save_all_tasks()
+                if skipped:
+                    _show_snack(
+                        f"Пропущено {skipped}: нет локального пути (облако?)",
+                        "#FF6B6B",
+                    )
+                page.update()
+                log.info("pick_file: done, added=%d skipped=%d", added, skipped)
+            except Exception:
+                log.exception("pick_file: post-processing failed")
+                _show_snack("Ошибка обновления UI, см. dayplanner.log", "#FF6B6B")
+
+        def pick_file(e):
+            log.info("pick_file: clicked, closing attach dialog")
+            try:
+                _close_dialog(dlg)
+            except Exception:
+                log.exception("pick_file: _close_dialog raised")
+            try:
+                page.run_task(_do_pick)
+            except Exception:
+                log.exception("pick_file: page.run_task failed")
+                _show_snack("Не удалось запустить выбор файла", "#FF6B6B")
 
         def cancel(e):
             _close_dialog(dlg)
