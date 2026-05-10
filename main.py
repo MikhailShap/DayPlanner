@@ -336,11 +336,13 @@ def main(page: ft.Page):
     tabs_row_ref = [None]
     tasks_column_ref = [None]
 
-    # File picker for attachments — added to overlay once.
+    # File picker for attachments. In Flet 0.80+ FilePicker is a Service,
+    # so it must be added to page.services (not page.overlay — that would
+    # render it as a visible "Unknown control" placeholder).
     # Each pick_file() rebinds on_result to a closure for the current task,
     # avoiding race conditions when multiple attach dialogs are opened.
     file_picker = ft.FilePicker()
-    page.overlay.append(file_picker)
+    page.services.append(file_picker)
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
