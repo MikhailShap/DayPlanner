@@ -5,16 +5,16 @@ import sys
 import ctypes
 from ctypes import wintypes
 import threading
+import winreg
+import webbrowser
 from functools import lru_cache
 
-# Single instance - проверка через mutex
+# Single instance check
 def check_single_instance():
     mutex_name = "DayPlanner_SingleInstance_Mutex"
     kernel32 = ctypes.windll.kernel32
     mutex = kernel32.CreateMutexW(None, False, mutex_name)
-    last_error = kernel32.GetLastError()
-    if last_error == 183:  # ERROR_ALREADY_EXISTS
-        # Найти и показать существующее окно
+    if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
         hwnd = ctypes.windll.user32.FindWindowW(None, "DayPlanner")
         if hwnd:
             ctypes.windll.user32.ShowWindow(hwnd, 5)
@@ -24,7 +24,6 @@ def check_single_instance():
 
 mutex = check_single_instance()
 
-# Системный трей
 try:
     import pystray
     from PIL import Image
@@ -32,8 +31,14 @@ try:
 except ImportError:
     TRAY_AVAILABLE = False
 
-TASKS_FILE = "tasks.json"
-SETTINGS_FILE = "settings.json"
+def get_base_path():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+BASE_PATH = get_base_path()
+TASKS_FILE = os.path.join(BASE_PATH, "tasks.json")
+SETTINGS_FILE = os.path.join(BASE_PATH, "settings.json")
 ICON_FILE = "icon.ico"
 
 GWL_EXSTYLE = -20
@@ -46,11 +51,6 @@ MOD_CTRL = 0x0002
 MOD_SHIFT = 0x0004
 VK_L = 0x4C
 HOTKEY_ID = 1
-
-MAX_WIDTH = 400
-MAX_HEIGHT = 720
-MIN_WIDTH = 280
-MIN_HEIGHT = 400
 
 user32 = ctypes.windll.user32
 
@@ -84,30 +84,62 @@ def load_tasks():
         try:
             with open(TASKS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                # Миграция старого формата
                 if isinstance(data, list):
                     return {"tabs": [{"name": "Главная", "tasks": data}], "active_tab": 0}
                 return data
-        except:
+        except Exception:
             pass
     return {"tabs": [{"name": "Главная", "tasks": []}], "active_tab": 0}
 
 def save_tasks(data):
-    with open(TASKS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, separators=(',', ':'))
+    try:
+        with open(TASKS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, separators=(',', ':'))
+    except Exception:
+        pass
 
 def load_settings():
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except:
-            return {}
+        except Exception:
+            pass
     return {}
 
 def save_settings(settings):
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(settings, f, ensure_ascii=False, separators=(',', ':'))
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, ensure_ascii=False, separators=(',', ':'))
+    except Exception:
+        pass
+
+def is_autostart_enabled():
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                             r"Software\Microsoft\Windows\CurrentVersion\Run")
+        winreg.QueryValueEx(key, "DayPlanner")
+        winreg.CloseKey(key)
+        return True
+    except Exception:
+        return False
+
+def set_autostart(enable):
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                             r"Software\Microsoft\Windows\CurrentVersion\Run",
+                             0, winreg.KEY_SET_VALUE)
+        if enable:
+            exe_path = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(sys.argv[0])
+            winreg.SetValueEx(key, "DayPlanner", 0, winreg.REG_SZ, f'"{exe_path}"')
+        else:
+            try:
+                winreg.DeleteValue(key, "DayPlanner")
+            except Exception:
+                pass
+        winreg.CloseKey(key)
+    except Exception:
+        pass
 
 class DeferredSaver:
     def __init__(self, delay=1.0):
@@ -115,22 +147,22 @@ class DeferredSaver:
         self.timer = None
         self.pending_tasks = None
         self.pending_settings = None
-    
+
     def save_tasks_deferred(self, tasks):
         self.pending_tasks = tasks
         self._schedule()
-    
+
     def save_settings_deferred(self, settings):
         self.pending_settings = settings
         self._schedule()
-    
+
     def _schedule(self):
         if self.timer:
             self.timer.cancel()
         self.timer = threading.Timer(self.delay, self._do_save)
         self.timer.daemon = True
         self.timer.start()
-    
+
     def _do_save(self):
         if self.pending_tasks is not None:
             save_tasks(self.pending_tasks)
@@ -138,7 +170,7 @@ class DeferredSaver:
         if self.pending_settings is not None:
             save_settings(self.pending_settings)
             self.pending_settings = None
-    
+
     def flush(self):
         if self.timer:
             self.timer.cancel()
@@ -147,38 +179,34 @@ class DeferredSaver:
 saver = DeferredSaver(delay=0.5)
 
 def get_icon_path():
-    if getattr(sys, 'frozen', False):
-        base_path = os.path.dirname(sys.executable)
-    else:
-        base_path = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base_path, ICON_FILE)
+    return os.path.join(BASE_PATH, ICON_FILE)
 
 def create_tray_icon():
     if not TRAY_AVAILABLE:
         return None
-    
+
     icon_path = get_icon_path()
     try:
-        if os.path.exists(icon_path):
-            image = Image.open(icon_path)
-        else:
-            image = Image.new('RGB', (64, 64), color=(127, 90, 240))
-    except:
+        image = Image.open(icon_path) if os.path.exists(icon_path) else Image.new('RGB', (64, 64), color=(127, 90, 240))
+    except Exception:
         image = Image.new('RGB', (64, 64), color=(127, 90, 240))
-    
+
     def show_window(icon, item):
         app_visible[0] = True
         hwnd = get_window_handle("DayPlanner")
         if hwnd:
             user32.ShowWindow(hwnd, 5)
             user32.SetForegroundWindow(hwnd)
-    
+
     def hide_window(icon, item):
         app_visible[0] = False
         hwnd = get_window_handle("DayPlanner")
         if hwnd:
             user32.ShowWindow(hwnd, 0)
-    
+
+    def toggle_autostart_tray(icon, item):
+        set_autostart(not is_autostart_enabled())
+
     def quit_app(icon, item):
         icon.stop()
         saver.flush()
@@ -186,15 +214,24 @@ def create_tray_icon():
         if hwnd:
             user32.ShowWindow(hwnd, 5)
             user32.PostMessageW(hwnd, 0x0010, 0, 0)
-        threading.Thread(target=lambda: ((__import__('time').sleep(0.2)), os._exit(0)), daemon=True).start()
-    
+        threading.Thread(
+            target=lambda: ((__import__('time').sleep(0.2)), os._exit(0)),
+            daemon=True
+        ).start()
+
     menu = pystray.Menu(
         pystray.MenuItem("Показать", show_window, default=True),
         pystray.MenuItem("Скрыть", hide_window),
         pystray.Menu.SEPARATOR,
+        pystray.MenuItem(
+            "Автозапуск с Windows",
+            toggle_autostart_tray,
+            checked=lambda item: is_autostart_enabled()
+        ),
+        pystray.Menu.SEPARATOR,
         pystray.MenuItem("Выход", quit_app)
     )
-    
+
     return pystray.Icon("DayPlanner", image, "DayPlanner", menu)
 
 
@@ -204,14 +241,14 @@ def main(page: ft.Page):
     page.window.bgcolor = ft.Colors.TRANSPARENT
     page.window.frameless = True
     page.window.shadow = False
-    
+
     page_ref[0] = page
-    
+
     if TRAY_AVAILABLE:
         tray_icon[0] = create_tray_icon()
         if tray_icon[0]:
             threading.Thread(target=tray_icon[0].run, daemon=True).start()
-    
+
     def hide_from_taskbar():
         __import__('time').sleep(0.3)
         hwnd = get_window_handle("DayPlanner")
@@ -221,16 +258,15 @@ def main(page: ft.Page):
             user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
             user32.ShowWindow(hwnd, 0)
             user32.ShowWindow(hwnd, 5)
-    
+
     threading.Thread(target=hide_from_taskbar, daemon=True).start()
-    
+
     settings = load_settings()
     tasks_data = load_tasks()
-    
-    # Фиксированный размер окна
+
     page.window.width = 380
     page.window.height = 650
-    
+
     if "window_x" in settings and "window_y" in settings:
         page.window.left = settings["window_x"]
         page.window.top = settings["window_y"]
@@ -247,14 +283,15 @@ def main(page: ft.Page):
     hwnd = [None]
     hotkey_thread_running = [True]
     dragging_task_id = [None]
-    
-    current_tab = [tasks_data.get("active_tab", 0)]
+
     tabs_list = tasks_data.get("tabs", [{"name": "Главная", "tasks": []}])
-    
+    active_tab_raw = tasks_data.get("active_tab", 0)
+    current_tab = [min(active_tab_raw, max(0, len(tabs_list) - 1))]
+
     tasks_data_list = []
     task_id_counter = [0]
     task_id_map = {}
-    
+
     main_container = ft.Ref[ft.Container]()
     lock_button = ft.Ref[ft.IconButton]()
     close_button = ft.Ref[ft.IconButton]()
@@ -264,8 +301,201 @@ def main(page: ft.Page):
     tabs_row_ref = [None]
     tasks_column_ref = [None]
 
+    # File picker for attachments — added to overlay once
+    pending_task_info = [None]
+
+    def on_file_picked(e: ft.FilePickerResultEvent):
+        if not e.files or not pending_task_info[0]:
+            return
+        task_info = pending_task_info[0]
+        pending_task_info[0] = None
+        for f in e.files:
+            task_info["attachments"].append({"type": "file", "name": f.name, "path": f.path})
+        _rebuild_attachment_chips(task_info)
+        save_all_tasks()
+        page.update()
+
+    file_picker = ft.FilePicker(on_result=on_file_picked)
+    page.overlay.append(file_picker)
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
     def find_task_by_id(task_id):
         return task_id_map.get(task_id)
+
+    def _close_dialog(dlg):
+        dlg.open = False
+        try:
+            page.overlay.remove(dlg)
+        except ValueError:
+            pass
+        page.update()
+
+    def _show_snack(text, color=None):
+        snack = ft.SnackBar(
+            content=ft.Text(text, color=TEXT_COLOR),
+            bgcolor="#333333",
+            duration=1500,
+        )
+        if color:
+            snack.content.color = color
+        page.overlay.append(snack)
+        snack.open = True
+        page.update()
+
+    def save_all_tasks():
+        tasks = [
+            {
+                "text": t["text"].value,
+                "done": t["checkbox"].value,
+                "attachments": t.get("attachments", []),
+            }
+            for t in tasks_data_list
+        ]
+        tabs_list[current_tab[0]]["tasks"] = tasks
+        saver.save_tasks_deferred({"tabs": tabs_list, "active_tab": current_tab[0]})
+
+    # ── attachment helpers ────────────────────────────────────────────────────
+
+    def open_attachment(attachment):
+        try:
+            if attachment["type"] == "url":
+                webbrowser.open(attachment["url"])
+            elif attachment["type"] == "file":
+                path = attachment.get("path", "")
+                if os.path.exists(path):
+                    os.startfile(path)
+                else:
+                    _show_snack(f"Файл не найден: {attachment.get('name', '')}", "#FF6B6B")
+        except Exception:
+            pass
+
+    def remove_attachment(task_info, attachment):
+        task_info["attachments"].remove(attachment)
+        _rebuild_attachment_chips(task_info)
+        save_all_tasks()
+        page.update()
+
+    def _rebuild_attachment_chips(task_info):
+        attachments = task_info.get("attachments", [])
+        row = task_info.get("attachments_row")
+        container = task_info.get("attachments_container")
+        if row is None:
+            return
+
+        row.controls.clear()
+        for att in attachments:
+            is_file = att["type"] == "file"
+            icon = ft.Icons.ATTACH_FILE_ROUNDED if is_file else ft.Icons.LINK_ROUNDED
+            name = att.get("name") or att.get("url", "Ссылка")
+            display = name[:22] + ("…" if len(name) > 22 else "")
+
+            chip = ft.Container(
+                content=ft.Row(
+                    controls=[
+                        ft.Icon(icon, size=11, color="#9B7FF0"),
+                        ft.Text(display, size=10, color="#9B7FF0"),
+                        ft.GestureDetector(
+                            content=ft.Icon(ft.Icons.CLOSE, size=10, color="#666666"),
+                            on_tap=lambda e, a=att, ti=task_info: remove_attachment(ti, a),
+                        ),
+                    ],
+                    spacing=3,
+                    tight=True,
+                ),
+                padding=ft.Padding(6, 3, 6, 3),
+                margin=ft.Margin(0, 0, 4, 0),
+                border_radius=12,
+                bgcolor="#2A2040",
+                on_click=lambda e, a=att: open_attachment(a),
+            )
+            row.controls.append(chip)
+
+        if container is not None:
+            container.visible = len(attachments) > 0
+
+    def show_attach_dialog(task_info):
+        if is_locked[0]:
+            return
+
+        url_field = ft.TextField(
+            hint_text="https://...",
+            hint_style=ft.TextStyle(color="#555555"),
+            text_style=ft.TextStyle(color=TEXT_COLOR),
+            border=ft.InputBorder.NONE,
+            filled=True,
+            fill_color="#333333",
+            border_radius=8,
+            content_padding=10,
+        )
+        name_field = ft.TextField(
+            hint_text="Название (необязательно)",
+            hint_style=ft.TextStyle(color="#555555"),
+            text_style=ft.TextStyle(color=TEXT_COLOR),
+            border=ft.InputBorder.NONE,
+            filled=True,
+            fill_color="#333333",
+            border_radius=8,
+            content_padding=10,
+        )
+
+        def add_url(e):
+            url = url_field.value.strip()
+            if not url:
+                return
+            if not url.startswith(("http://", "https://")):
+                url = "https://" + url
+            label = name_field.value.strip() or url
+            task_info["attachments"].append({"type": "url", "name": label, "url": url})
+            _rebuild_attachment_chips(task_info)
+            save_all_tasks()
+            _close_dialog(dlg)
+
+        def pick_file(e):
+            _close_dialog(dlg)
+            pending_task_info[0] = task_info
+            file_picker.pick_files(allow_multiple=True)
+
+        def cancel(e):
+            _close_dialog(dlg)
+
+        url_field.on_submit = add_url
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Добавить вложение", color=TEXT_COLOR),
+            bgcolor="#252525",
+            content=ft.Container(
+                width=300,
+                content=ft.Column(
+                    controls=[
+                        ft.ElevatedButton(
+                            "Выбрать файл / изображение",
+                            icon=ft.Icons.ATTACH_FILE_ROUNDED,
+                            on_click=pick_file,
+                            style=ft.ButtonStyle(bgcolor="#333333", color=TEXT_COLOR),
+                            expand=True,
+                        ),
+                        ft.Divider(color="#3A3A3A", height=20),
+                        ft.Text("Или добавить ссылку:", color="#999999", size=12),
+                        url_field,
+                        name_field,
+                    ],
+                    spacing=8,
+                    tight=True,
+                ),
+            ),
+            actions=[
+                ft.TextButton("Отмена", on_click=cancel),
+                ft.TextButton("Добавить ссылку", on_click=add_url),
+            ],
+        )
+
+        page.overlay.append(dlg)
+        dlg.open = True
+        page.update()
+
+    # ── opacity / lock ────────────────────────────────────────────────────────
 
     def apply_locked_style():
         current_opacity = LOCKED_OPACITY if is_locked[0] else opacity_value
@@ -277,18 +507,17 @@ def main(page: ft.Page):
             task_info["container"].bgcolor = card
 
     last_opacity_update = [0]
-    
+
     def on_opacity_change(e):
         nonlocal opacity_value
         if is_locked[0]:
             return
-        
         import time
         now = time.time()
         if now - last_opacity_update[0] < 0.1:
             return
         last_opacity_update[0] = now
-        
+
         opacity_value = round(e.control.value, 1)
         bg = get_bg_color(opacity_value)
         card = get_card_color(opacity_value)
@@ -296,7 +525,7 @@ def main(page: ft.Page):
         input_field.current.fill_color = card
         for task_info in tasks_data_list:
             task_info["container"].bgcolor = card
-        
+
         settings["opacity"] = opacity_value
         saver.save_settings_deferred(settings.copy())
         page.update()
@@ -304,21 +533,18 @@ def main(page: ft.Page):
     def close_app(e):
         if is_locked[0]:
             return
-        
         settings["window_x"] = page.window.left
         settings["window_y"] = page.window.top
         settings["window_width"] = page.window.width
         settings["window_height"] = page.window.height
         saver.flush()
-        
+
         if TRAY_AVAILABLE and tray_icon[0]:
-            # Сворачиваем в трей
             app_visible[0] = False
             hwnd_win = get_window_handle("DayPlanner")
             if hwnd_win:
                 user32.ShowWindow(hwnd_win, 0)
         else:
-            # Закрываем приложение
             hotkey_thread_running[0] = False
             hwnd_close = get_window_handle("DayPlanner")
             if hwnd_close:
@@ -335,27 +561,27 @@ def main(page: ft.Page):
         opacity_slider.current.active_color = DISABLED_COLOR if locked else ACCENT_COLOR
         input_field.current.disabled = locked
         input_field.current.hint_style = ft.TextStyle(color=DISABLED_COLOR if locked else "#555555")
-        
+
         for task_info in tasks_data_list:
-            task_info["checkbox"].disabled = locked
-            task_info["delete_btn"].disabled = locked
-            task_info["edit_btn"].disabled = locked
-            task_info["copy_btn"].disabled = locked
-            task_info["delete_btn"].icon_color = DISABLED_COLOR if locked else "#555555"
-            task_info["edit_btn"].icon_color = DISABLED_COLOR if locked else "#555555"
-            task_info["copy_btn"].icon_color = DISABLED_COLOR if locked else "#555555"
+            for btn_key in ("checkbox", "delete_btn", "edit_btn", "copy_btn", "attach_btn"):
+                ctrl = task_info.get(btn_key)
+                if ctrl:
+                    ctrl.disabled = locked
+            for btn_key in ("delete_btn", "edit_btn", "copy_btn", "attach_btn"):
+                ctrl = task_info.get(btn_key)
+                if ctrl:
+                    ctrl.icon_color = DISABLED_COLOR if locked else "#555555"
 
     def toggle_lock(e=None):
         is_locked[0] = not is_locked[0]
-        
+
         if hwnd[0] is None:
             hwnd[0] = get_window_handle("DayPlanner")
-        
+
         page.window.always_on_top = is_locked[0]
-        
         if hwnd[0]:
             set_click_through(hwnd[0], is_locked[0])
-        
+
         if is_locked[0]:
             lock_button.current.icon = ft.Icons.LOCK_ROUNDED
             lock_button.current.icon_color = ACCENT_COLOR
@@ -364,14 +590,12 @@ def main(page: ft.Page):
             lock_button.current.icon = ft.Icons.LOCK_OPEN_ROUNDED
             lock_button.current.icon_color = "#666666"
             lock_button.current.tooltip = "Зафиксировать"
-        
+
         settings["is_locked"] = is_locked[0]
         settings["window_x"] = page.window.left
         settings["window_y"] = page.window.top
-        settings["window_width"] = page.window.width
-        settings["window_height"] = page.window.height
         saver.save_settings_deferred(settings.copy())
-        
+
         update_ui_state()
         apply_locked_style()
         update_header()
@@ -389,11 +613,7 @@ def main(page: ft.Page):
 
     threading.Thread(target=hotkey_listener, daemon=True).start()
 
-    def save_all_tasks():
-        tasks = [{"text": t["text"].value, "done": t["checkbox"].value} for t in tasks_data_list]
-        tabs_list[current_tab[0]]["tasks"] = tasks
-        data = {"tabs": tabs_list, "active_tab": current_tab[0]}
-        saver.save_tasks_deferred(data)
+    # ── task CRUD ─────────────────────────────────────────────────────────────
 
     def on_checkbox_change(e, task_info):
         if is_locked[0]:
@@ -420,7 +640,7 @@ def main(page: ft.Page):
     def edit_task(task_info):
         if is_locked[0]:
             return
-        
+
         edit_field = ft.TextField(
             value=task_info["text"].value,
             text_style=ft.TextStyle(color=TEXT_COLOR),
@@ -431,34 +651,32 @@ def main(page: ft.Page):
             content_padding=10,
             expand=True,
             autofocus=True,
+            multiline=True,
+            min_lines=2,
+            max_lines=6,
         )
-        
+
         def save_edit(e):
             new_text = edit_field.value.strip()
             if new_text:
                 task_info["text"].value = new_text
                 save_all_tasks()
-            dlg.open = False
-            page.update()
-        
+            _close_dialog(dlg)
+
         def cancel_edit(e):
-            dlg.open = False
-            page.update()
-        
+            _close_dialog(dlg)
+
         dlg = ft.AlertDialog(
             modal=True,
             title=ft.Text("Редактировать задачу", color=TEXT_COLOR),
             bgcolor="#252525",
-            content=ft.Container(
-                width=300,
-                content=edit_field,
-            ),
+            content=ft.Container(width=300, content=edit_field),
             actions=[
                 ft.TextButton("Отмена", on_click=cancel_edit),
                 ft.TextButton("Сохранить", on_click=save_edit),
             ],
         )
-        
+
         page.overlay.append(dlg)
         dlg.open = True
         page.update()
@@ -466,23 +684,12 @@ def main(page: ft.Page):
     def copy_task(task_info):
         if is_locked[0]:
             return
-        
-        text = task_info["text"].value
-        
-        # Копируем через subprocess и clip.exe
         import subprocess
         process = subprocess.Popen(['clip'], stdin=subprocess.PIPE, shell=True)
-        process.communicate(text.encode('utf-16-le'))
-        
-        # Показываем уведомление
-        snack = ft.SnackBar(
-            content=ft.Text("Скопировано!", color=TEXT_COLOR),
-            bgcolor="#333333",
-            duration=1000,
-        )
-        page.overlay.append(snack)
-        snack.open = True
-        page.update()
+        process.communicate(task_info["text"].value.encode('utf-16-le'))
+        _show_snack("Скопировано!")
+
+    # ── drag & drop ───────────────────────────────────────────────────────────
 
     def reset_all_styles():
         for task_info in tasks_data_list:
@@ -567,7 +774,7 @@ def main(page: ft.Page):
             return
         try:
             src_id = int(e.data)
-        except:
+        except Exception:
             return
         src_task = find_task_by_id(src_id)
         if not src_task:
@@ -591,7 +798,7 @@ def main(page: ft.Page):
             return
         try:
             src_id = int(e.data)
-        except:
+        except Exception:
             return
         src_task = find_task_by_id(src_id)
         if not src_task:
@@ -610,95 +817,100 @@ def main(page: ft.Page):
         dragging_task_id[0] = None
         page.update()
 
-    def create_task_item(text, is_done=False):
+    # ── task item builder ─────────────────────────────────────────────────────
+
+    def create_task_item(text, is_done=False, attachments=None):
+        if attachments is None:
+            attachments = []
         current_opacity = LOCKED_OPACITY if is_locked[0] else opacity_value
         text_style = ft.TextStyle(decoration=ft.TextDecoration.LINE_THROUGH) if is_done else None
         text_color = "#666666" if is_done else TEXT_COLOR
-        
+
         task_id = task_id_counter[0]
         task_id_counter[0] += 1
-        
-        task_info = {"id": task_id}
-        
+
+        task_info = {"id": task_id, "attachments": list(attachments)}
+
         checkbox = ft.Checkbox(
             value=is_done,
             active_color=ACCENT_COLOR,
             check_color=TEXT_COLOR,
             disabled=is_locked[0],
         )
-        
+        checkbox.on_change = lambda e: on_checkbox_change(e, task_info)
+
         text_control = ft.Text(
             text, color=text_color, size=13,
             weight=ft.FontWeight.W_500, style=text_style,
             expand=True,
         )
-        
+
         edit_btn = ft.IconButton(
-            icon=ft.Icons.EDIT_OUTLINED,
-            icon_size=15,
+            icon=ft.Icons.EDIT_OUTLINED, icon_size=15,
             icon_color=DISABLED_COLOR if is_locked[0] else "#555555",
-            tooltip="Редактировать",
-            disabled=is_locked[0],
+            tooltip="Редактировать", disabled=is_locked[0],
             on_click=lambda e, ti=task_info: edit_task(ti),
             style=ft.ButtonStyle(padding=2),
         )
-        
         copy_btn = ft.IconButton(
-            icon=ft.Icons.COPY_OUTLINED,
-            icon_size=15,
+            icon=ft.Icons.COPY_OUTLINED, icon_size=15,
             icon_color=DISABLED_COLOR if is_locked[0] else "#555555",
-            tooltip="Копировать",
-            disabled=is_locked[0],
+            tooltip="Копировать", disabled=is_locked[0],
             on_click=lambda e, ti=task_info: copy_task(ti),
             style=ft.ButtonStyle(padding=2),
         )
-        
-        delete_btn = ft.IconButton(
-            icon=ft.Icons.CLOSE_ROUNDED,
-            icon_size=15,
+        attach_btn = ft.IconButton(
+            icon=ft.Icons.ATTACH_FILE_ROUNDED, icon_size=15,
             icon_color=DISABLED_COLOR if is_locked[0] else "#555555",
-            tooltip="Удалить",
-            disabled=is_locked[0],
+            tooltip="Вложение", disabled=is_locked[0],
+            on_click=lambda e, ti=task_info: show_attach_dialog(ti),
+            style=ft.ButtonStyle(padding=2),
+        )
+        delete_btn = ft.IconButton(
+            icon=ft.Icons.CLOSE_ROUNDED, icon_size=15,
+            icon_color=DISABLED_COLOR if is_locked[0] else "#555555",
+            tooltip="Удалить", disabled=is_locked[0],
             on_click=lambda e, ti=task_info: delete_task(ti),
             style=ft.ButtonStyle(padding=2),
         )
-        
-        checkbox.on_change = lambda e: on_checkbox_change(e, task_info)
-        
-        # Адаптивный layout: если текст короткий - кнопки горизонтально, иначе вертикально
-        is_short_text = len(text) <= 25
-        
-        if is_short_text:
-            # Короткий текст - всё в одну строку, кнопки горизонтально
-            buttons = ft.Row(controls=[edit_btn, copy_btn, delete_btn], spacing=0)
-            card_content = ft.Row(
-                controls=[
-                    ft.Icon(ft.Icons.DRAG_INDICATOR_ROUNDED, color="#3A3A3A", size=16),
-                    checkbox,
-                    text_control,
-                    buttons,
-                ],
-                spacing=0,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            )
-        else:
-            # Длинный текст - кнопки вертикально справа
-            buttons = ft.Column(
-                controls=[edit_btn, copy_btn, delete_btn],
-                spacing=0,
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            )
-            card_content = ft.Row(
-                controls=[
-                    ft.Icon(ft.Icons.DRAG_INDICATOR_ROUNDED, color="#3A3A3A", size=16),
-                    checkbox,
-                    text_control,
-                    buttons,
-                ],
-                spacing=0,
-                vertical_alignment=ft.CrossAxisAlignment.START,
-            )
-        
+
+        buttons = ft.Column(
+            controls=[edit_btn, copy_btn, attach_btn, delete_btn],
+            spacing=0,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+        main_row = ft.Row(
+            controls=[
+                ft.Icon(ft.Icons.DRAG_INDICATOR_ROUNDED, color="#3A3A3A", size=16),
+                checkbox,
+                text_control,
+                buttons,
+            ],
+            spacing=0,
+            vertical_alignment=ft.CrossAxisAlignment.START,
+        )
+
+        # Attachment chips row
+        attachments_row = ft.Row(controls=[], spacing=0, scroll=ft.ScrollMode.AUTO, wrap=False)
+        task_info["attachments_row"] = attachments_row
+
+        attachments_container = ft.Container(
+            content=attachments_row,
+            padding=ft.Padding(36, 0, 4, 4),
+            visible=len(attachments) > 0,
+        )
+        task_info["attachments_container"] = attachments_container
+
+        # Build initial chips
+        _rebuild_attachment_chips(task_info)
+
+        card_content = ft.Column(
+            controls=[main_row, attachments_container],
+            spacing=0,
+            tight=True,
+        )
+
         card = ft.Container(
             margin=ft.Margin(0, 0, 0, 6),
             padding=ft.Padding(8, 8, 4, 8),
@@ -713,19 +925,20 @@ def main(page: ft.Page):
             opacity=1.0,
             content=card_content,
         )
-        
+
         task_info.update({
             "checkbox": checkbox,
             "text": text_control,
             "edit_btn": edit_btn,
             "copy_btn": copy_btn,
+            "attach_btn": attach_btn,
             "delete_btn": delete_btn,
             "container": card,
         })
-        
+
         tasks_data_list.append(task_info)
         task_id_map[task_id] = task_info
-        
+
         feedback = ft.Container(
             width=280,
             padding=ft.Padding(8, 8, 8, 8),
@@ -744,16 +957,15 @@ def main(page: ft.Page):
                     ft.Icon(ft.Icons.DRAG_INDICATOR_ROUNDED, color="#3A3A3A", size=16),
                     ft.Checkbox(value=is_done, active_color=ACCENT_COLOR, check_color=TEXT_COLOR, disabled=True),
                     ft.Text(
-                        text[:40] + "..." if len(text) > 40 else text, 
-                        color=text_color, size=13, 
-                        weight=ft.FontWeight.W_500, 
-                        style=text_style
+                        text[:40] + ("…" if len(text) > 40 else ""),
+                        color=text_color, size=13,
+                        weight=ft.FontWeight.W_500, style=text_style,
                     ),
                 ],
                 spacing=0,
             )
         )
-        
+
         draggable = ft.Draggable(
             group="tasks",
             content=card,
@@ -762,7 +974,7 @@ def main(page: ft.Page):
             on_drag_start=lambda e: drag_start(task_id),
             on_drag_complete=drag_end,
         )
-        
+
         return ft.DragTarget(
             group="tasks",
             content=draggable,
@@ -783,29 +995,36 @@ def main(page: ft.Page):
         save_all_tasks()
         page.update()
 
-    def on_input_submit(e):
-        add_task(e)
+    # ── tabs ──────────────────────────────────────────────────────────────────
 
-    # === ВКЛАДКИ ===
-    def switch_tab(index):
-        if is_locked[0]:
-            return
-        
-        # Сохраняем текущие задачи
-        tasks = [{"text": t["text"].value, "done": t["checkbox"].value} for t in tasks_data_list]
-        tabs_list[current_tab[0]]["tasks"] = tasks
-        
-        current_tab[0] = index
-        
-        # Очищаем и загружаем новые
+    def _load_tab_tasks(index):
         tasks_data_list.clear()
         task_id_map.clear()
         tasks_column_ref[0].controls.clear()
-        
         for task in tabs_list[index].get("tasks", []):
-            task_item = create_task_item(task.get("text", ""), task.get("done", False))
+            task_item = create_task_item(
+                task.get("text", ""),
+                task.get("done", False),
+                task.get("attachments", []),
+            )
             tasks_column_ref[0].controls.append(task_item)
-        
+
+    def _save_current_tab_tasks():
+        tabs_list[current_tab[0]]["tasks"] = [
+            {
+                "text": t["text"].value,
+                "done": t["checkbox"].value,
+                "attachments": t.get("attachments", []),
+            }
+            for t in tasks_data_list
+        ]
+
+    def switch_tab(index):
+        if is_locked[0]:
+            return
+        _save_current_tab_tasks()
+        current_tab[0] = index
+        _load_tab_tasks(index)
         save_all_tasks()
         rebuild_tabs()
         page.update()
@@ -813,7 +1032,7 @@ def main(page: ft.Page):
     def add_tab(e):
         if is_locked[0]:
             return
-        
+
         name_field = ft.TextField(
             hint_text="Название вкладки...",
             text_style=ft.TextStyle(color=TEXT_COLOR),
@@ -824,20 +1043,20 @@ def main(page: ft.Page):
             content_padding=10,
             autofocus=True,
         )
-        
+
         def create_tab(e):
             name = name_field.value.strip()
             if name:
                 tabs_list.append({"name": name, "tasks": []})
                 save_all_tasks()
                 rebuild_tabs()
-            dlg.open = False
-            page.update()
-        
+            _close_dialog(dlg)
+
         def cancel(e):
-            dlg.open = False
-            page.update()
-        
+            _close_dialog(dlg)
+
+        name_field.on_submit = create_tab
+
         dlg = ft.AlertDialog(
             modal=True,
             title=ft.Text("Новая вкладка", color=TEXT_COLOR),
@@ -848,7 +1067,7 @@ def main(page: ft.Page):
                 ft.TextButton("Создать", on_click=create_tab),
             ],
         )
-        
+
         page.overlay.append(dlg)
         dlg.open = True
         page.update()
@@ -856,80 +1075,62 @@ def main(page: ft.Page):
     def delete_tab(index):
         if is_locked[0] or len(tabs_list) <= 1:
             return
-        
+
         def confirm_delete(e):
-            # Сначала сохраняем задачи ТЕКУЩЕЙ вкладки (если она не удаляемая)
             if current_tab[0] != index:
-                tasks = [{"text": t["text"].value, "done": t["checkbox"].value} for t in tasks_data_list]
-                tabs_list[current_tab[0]]["tasks"] = tasks
-            
-            # Удаляем вкладку
+                _save_current_tab_tasks()
+
             tabs_list.pop(index)
-            
-            # Корректируем индекс текущей вкладки
+
             if current_tab[0] == index:
-                # Удаляем текущую вкладку - переключаемся на соседнюю
                 new_index = min(index, len(tabs_list) - 1)
                 current_tab[0] = new_index
-                
-                # Очищаем и загружаем задачи новой вкладки
-                tasks_data_list.clear()
-                task_id_map.clear()
-                tasks_column_ref[0].controls.clear()
-                
-                for task in tabs_list[new_index].get("tasks", []):
-                    task_item = create_task_item(task.get("text", ""), task.get("done", False))
-                    tasks_column_ref[0].controls.append(task_item)
+                _load_tab_tasks(new_index)
             elif current_tab[0] > index:
-                # Удаляем вкладку слева от текущей - сдвигаем индекс
                 current_tab[0] -= 1
-            
-            # Сохраняем
-            data = {"tabs": tabs_list, "active_tab": current_tab[0]}
-            saver.save_tasks_deferred(data)
-            
+
+            saver.save_tasks_deferred({"tabs": tabs_list, "active_tab": current_tab[0]})
             rebuild_tabs()
-            dlg.open = False
-            page.update()
-        
+            _close_dialog(dlg)
+
         def cancel(e):
-            dlg.open = False
-            page.update()
-        
+            _close_dialog(dlg)
+
         dlg = ft.AlertDialog(
             modal=True,
             title=ft.Text("Удалить вкладку?", color=TEXT_COLOR),
             bgcolor="#252525",
-            content=ft.Text(f'Удалить "{tabs_list[index]["name"]}" и все её задачи?', color="#999999"),
+            content=ft.Text(
+                f'Удалить "{tabs_list[index]["name"]}" и все её задачи?',
+                color="#999999",
+            ),
             actions=[
                 ft.TextButton("Отмена", on_click=cancel),
                 ft.TextButton("Удалить", on_click=confirm_delete),
             ],
         )
-        
+
         page.overlay.append(dlg)
         dlg.open = True
         page.update()
 
     def rebuild_tabs():
         tabs_row_ref[0].controls.clear()
-        
+
         for i, tab in enumerate(tabs_list):
             is_active = i == current_tab[0]
-            
             tab_btn = ft.Container(
                 content=ft.Row(
                     controls=[
                         ft.Text(
-                            tab["name"][:10] + ("..." if len(tab["name"]) > 10 else ""),
+                            tab["name"][:10] + ("…" if len(tab["name"]) > 10 else ""),
                             size=11,
                             color=TEXT_COLOR if is_active else "#666666",
                             weight=ft.FontWeight.W_600 if is_active else ft.FontWeight.W_400,
                         ),
                         ft.GestureDetector(
                             content=ft.Icon(
-                                ft.Icons.CLOSE,
-                                size=12,
+                                ft.Icons.CLOSE, size=12,
                                 color="#666666" if not is_locked[0] and len(tabs_list) > 1 else "#333333",
                             ),
                             on_tap=lambda e, idx=i: delete_tab(idx) if len(tabs_list) > 1 else None,
@@ -943,17 +1144,17 @@ def main(page: ft.Page):
                 on_click=lambda e, idx=i: switch_tab(idx),
             )
             tabs_row_ref[0].controls.append(tab_btn)
-        
-        # Кнопка добавления
+
         if not is_locked[0]:
-            add_tab_btn = ft.Container(
+            tabs_row_ref[0].controls.append(ft.Container(
                 content=ft.Icon(ft.Icons.ADD, size=16, color="#666666"),
                 padding=ft.Padding(8, 6, 8, 6),
                 border_radius=8,
                 bgcolor="#2A2A2A",
                 on_click=add_tab,
-            )
-            tabs_row_ref[0].controls.append(add_tab_btn)
+            ))
+
+    # ── header ────────────────────────────────────────────────────────────────
 
     def create_header_content():
         return ft.Container(
@@ -988,9 +1189,9 @@ def main(page: ft.Page):
                             ),
                         ],
                         spacing=0,
-                    )
+                    ),
                 ],
-                alignment=ft.MainAxisAlignment.SPACE_BETWEEN
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             )
         )
 
@@ -1002,16 +1203,17 @@ def main(page: ft.Page):
         )
         rebuild_tabs()
 
+    # ── layout assembly ───────────────────────────────────────────────────────
+
     header_content = create_header_content()
     header_drop = ft.DragTarget(
         group="tasks",
-        content=ft.WindowDragArea(content=header_content) if not is_locked[0] else ft.Container(content=header_content),
+        content=ft.WindowDragArea(content=header_content),
         on_accept=move_to_top,
     )
 
-    current_opacity_val = LOCKED_OPACITY if is_locked[0] else opacity_value
+    current_opacity_val = opacity_value
 
-    # Вкладки
     tabs_row = ft.Row(controls=[], spacing=6, scroll=ft.ScrollMode.AUTO)
     tabs_row_ref[0] = tabs_row
     rebuild_tabs()
@@ -1031,9 +1233,8 @@ def main(page: ft.Page):
                     ft.Slider(
                         ref=opacity_slider,
                         min=0.3, max=1.0, value=opacity_value,
-                        active_color=DISABLED_COLOR if is_locked[0] else ACCENT_COLOR,
+                        active_color=ACCENT_COLOR,
                         inactive_color="#333333",
-                        disabled=is_locked[0],
                         on_change=on_opacity_change,
                         expand=True,
                     ),
@@ -1047,15 +1248,14 @@ def main(page: ft.Page):
     input_field_control = ft.TextField(
         ref=input_field,
         hint_text="Новая задача...",
-        hint_style=ft.TextStyle(color=DISABLED_COLOR if is_locked[0] else "#555555"),
+        hint_style=ft.TextStyle(color="#555555"),
         text_style=ft.TextStyle(color=TEXT_COLOR),
         border=ft.InputBorder.NONE,
         filled=True,
         fill_color=get_card_color(current_opacity_val),
         border_radius=16,
         content_padding=15,
-        disabled=is_locked[0],
-        on_submit=on_input_submit,
+        on_submit=add_task,
     )
 
     input_drop = ft.DragTarget(
@@ -1069,9 +1269,8 @@ def main(page: ft.Page):
                         ref=add_button,
                         icon=ft.Icons.ADD_ROUNDED,
                         icon_size=22,
-                        icon_color=DISABLED_COLOR if is_locked[0] else ACCENT_COLOR,
+                        icon_color=ACCENT_COLOR,
                         tooltip="Добавить",
-                        disabled=is_locked[0],
                         on_click=add_task,
                     ),
                 ],
@@ -1100,9 +1299,7 @@ def main(page: ft.Page):
     tasks_column = ft.Column(spacing=0, controls=[])
     tasks_column_ref[0] = tasks_column
 
-    # Загружаем задачи текущей вкладки
-    for task in tabs_list[current_tab[0]].get("tasks", []):
-        tasks_column.controls.append(create_task_item(task.get("text", ""), task.get("done", False)))
+    _load_tab_tasks(current_tab[0])
 
     bottom_space_drop = ft.DragTarget(
         group="tasks",
@@ -1122,7 +1319,7 @@ def main(page: ft.Page):
 
     ui_column = ft.Column(
         spacing=0, expand=True,
-        controls=[header_drop, tabs_container, slider_drop, tasks_list, input_drop, hint_drop]
+        controls=[header_drop, tabs_container, slider_drop, tasks_list, input_drop, hint_drop],
     )
 
     main_layout = ft.Container(
