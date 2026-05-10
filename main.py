@@ -477,19 +477,63 @@ def main(page: ft.Page):
     def find_task_by_id(task_id):
         return task_id_map.get(task_id)
 
-    def _open_dialog(dlg):
-        # Flet 0.80+: use page.show_dialog instead of overlay.append + dlg.open
-        try:
-            page.show_dialog(dlg)
-        except Exception:
-            log.exception("_open_dialog failed for %r", type(dlg).__name__)
+    # Custom in-window modal. Flet 0.80's AlertDialog sizes itself to the
+    # screen, not to our small frameless 380px window — it overflowed and
+    # rendered as a "second window". A plain Container in page.overlay stays
+    # within window bounds and looks consistent across all dialogs.
+    modal_holder = [None]
 
-    def _close_dialog(dlg=None):
-        # Flet 0.80+: pop the topmost dialog. Old dlg.open=False has no effect.
+    def _show_modal(title, body, actions):
+        _close_modal()
+        panel = ft.Container(
+            width=320,
+            bgcolor="#252525",
+            border_radius=14,
+            padding=ft.Padding(20, 18, 20, 14),
+            border=ft.Border(
+                ft.BorderSide(1, "#3A3A3A"),
+                ft.BorderSide(1, "#3A3A3A"),
+                ft.BorderSide(1, "#3A3A3A"),
+                ft.BorderSide(1, "#3A3A3A"),
+            ),
+            content=ft.Column(
+                controls=[
+                    ft.Text(title, color=TEXT_COLOR, size=17,
+                            weight=ft.FontWeight.W_600),
+                    ft.Container(height=10),
+                    body,
+                    ft.Container(height=8),
+                    ft.Row(
+                        controls=actions,
+                        alignment=ft.MainAxisAlignment.END,
+                        spacing=4,
+                    ),
+                ],
+                spacing=0,
+                tight=True,
+            ),
+        )
+        overlay = ft.Container(
+            expand=True,
+            bgcolor="#AA000000",
+            alignment=ft.Alignment.CENTER,
+            content=panel,
+        )
+        modal_holder[0] = overlay
+        page.overlay.append(overlay)
+        page.update()
+        return overlay
+
+    def _close_modal(*_args, **_kw):
+        overlay = modal_holder[0]
+        if overlay is None:
+            return
+        modal_holder[0] = None
         try:
-            page.pop_dialog()
-        except Exception:
-            log.exception("_close_dialog failed")
+            page.overlay.remove(overlay)
+        except ValueError:
+            pass
+        page.update()
 
     def _show_snack(text, color=None):
         snack = ft.SnackBar(
@@ -517,44 +561,38 @@ def main(page: ft.Page):
 
         autostart_switch.on_change = on_autostart_toggle
 
-        dlg = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Настройки", color=TEXT_COLOR),
-            bgcolor="#252525",
-            content=ft.Container(
-                width=320,
-                content=ft.Column(
+        body = ft.Column(
+            controls=[
+                ft.Row(
                     controls=[
-                        ft.Row(
-                            controls=[
-                                ft.Icon(ft.Icons.LAUNCH_ROUNDED, color="#9B7FF0", size=18),
-                                ft.Text(
-                                    "Автозапуск с Windows",
-                                    color=TEXT_COLOR, size=13, expand=True,
-                                ),
-                                autostart_switch,
-                            ],
-                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        ),
+                        ft.Icon(ft.Icons.LAUNCH_ROUNDED, color="#9B7FF0", size=18),
                         ft.Text(
-                            "Программа будет запускаться вместе с Windows и сворачиваться в трей.",
-                            color="#888888", size=11,
+                            "Автозапуск с Windows",
+                            color=TEXT_COLOR, size=13, expand=True,
                         ),
-                        ft.Divider(color="#3A3A3A", height=18),
-                        ft.Text("Горячие клавиши:", color="#999999", size=12,
-                                weight=ft.FontWeight.W_500),
-                        ft.Text("Ctrl+Shift+L  —  режим замка (поверх всех / клик-сквозь)",
-                                color="#888888", size=11),
-                        ft.Text("Enter  —  добавить задачу", color="#888888", size=11),
+                        autostart_switch,
                     ],
-                    spacing=8,
-                    tight=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
-            ),
-            actions=[ft.TextButton("Закрыть", on_click=lambda ev: _close_dialog(dlg))],
+                ft.Text(
+                    "Программа будет запускаться вместе с Windows и сворачиваться в трей.",
+                    color="#888888", size=11,
+                ),
+                ft.Divider(color="#3A3A3A", height=18),
+                ft.Text("Горячие клавиши:", color="#999999", size=12,
+                        weight=ft.FontWeight.W_500),
+                ft.Text("Ctrl+Shift+L  —  режим замка (поверх всех / клик-сквозь)",
+                        color="#888888", size=11),
+                ft.Text("Enter  —  добавить задачу", color="#888888", size=11),
+            ],
+            spacing=8,
+            tight=True,
         )
-
-        _open_dialog(dlg)
+        _show_modal(
+            "Настройки",
+            body,
+            [ft.TextButton("Закрыть", on_click=_close_modal)],
+        )
 
     def save_all_tasks():
         tasks = [
@@ -702,16 +740,16 @@ def main(page: ft.Page):
         )
 
         def add_url(e):
-            url = url_field.value.strip()
+            url = (url_field.value or "").strip()
             if not url:
                 return
             if not url.startswith(("http://", "https://")):
                 url = "https://" + url
-            label = name_field.value.strip() or url
+            label = (name_field.value or "").strip() or url
             task_info["attachments"].append({"type": "url", "name": label, "url": url})
             _rebuild_attachment_chips(task_info)
             save_all_tasks()
-            _close_dialog(dlg)
+            _close_modal()
 
         async def _do_pick():
             log.info("pick_file: opening native picker")
@@ -762,53 +800,44 @@ def main(page: ft.Page):
                 _show_snack("Ошибка обновления UI, см. dayplanner.log", "#FF6B6B")
 
         def pick_file(e):
-            log.info("pick_file: clicked, closing attach dialog")
+            log.info("pick_file: clicked, closing attach modal")
             try:
-                _close_dialog(dlg)
+                _close_modal()
             except Exception:
-                log.exception("pick_file: _close_dialog raised")
+                log.exception("pick_file: _close_modal raised")
             try:
                 page.run_task(_do_pick)
             except Exception:
                 log.exception("pick_file: page.run_task failed")
                 _show_snack("Не удалось запустить выбор файла", "#FF6B6B")
 
-        def cancel(e):
-            _close_dialog(dlg)
-
         url_field.on_submit = add_url
 
-        dlg = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Добавить вложение", color=TEXT_COLOR),
-            bgcolor="#252525",
-            content=ft.Container(
-                width=300,
-                content=ft.Column(
-                    controls=[
-                        ft.ElevatedButton(
-                            "Выбрать файл / изображение",
-                            icon=ft.Icons.ATTACH_FILE_ROUNDED,
-                            on_click=pick_file,
-                            style=ft.ButtonStyle(bgcolor="#333333", color=TEXT_COLOR),
-                            expand=True,
-                        ),
-                        ft.Divider(color="#3A3A3A", height=20),
-                        ft.Text("Или добавить ссылку:", color="#999999", size=12),
-                        url_field,
-                        name_field,
-                    ],
-                    spacing=8,
-                    tight=True,
+        body = ft.Column(
+            controls=[
+                ft.ElevatedButton(
+                    "Выбрать файл / изображение",
+                    icon=ft.Icons.ATTACH_FILE_ROUNDED,
+                    on_click=pick_file,
+                    style=ft.ButtonStyle(bgcolor="#333333", color=TEXT_COLOR),
+                    expand=True,
                 ),
-            ),
-            actions=[
-                ft.TextButton("Отмена", on_click=cancel),
+                ft.Divider(color="#3A3A3A", height=20),
+                ft.Text("Или добавить ссылку:", color="#999999", size=12),
+                url_field,
+                name_field,
+            ],
+            spacing=8,
+            tight=True,
+        )
+        _show_modal(
+            "Добавить вложение",
+            body,
+            [
+                ft.TextButton("Отмена", on_click=_close_modal),
                 ft.TextButton("Добавить ссылку", on_click=add_url),
             ],
         )
-
-        _open_dialog(dlg)
 
     # ── opacity / lock ────────────────────────────────────────────────────────
 
@@ -975,27 +1004,20 @@ def main(page: ft.Page):
         )
 
         def save_edit(e):
-            new_text = edit_field.value.strip()
+            new_text = (edit_field.value or "").strip()
             if new_text:
                 task_info["text"].value = new_text
                 save_all_tasks()
-            _close_dialog(dlg)
+            _close_modal()
 
-        def cancel_edit(e):
-            _close_dialog(dlg)
-
-        dlg = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Редактировать задачу", color=TEXT_COLOR),
-            bgcolor="#252525",
-            content=ft.Container(width=300, content=edit_field),
-            actions=[
-                ft.TextButton("Отмена", on_click=cancel_edit),
+        _show_modal(
+            "Редактировать задачу",
+            edit_field,
+            [
+                ft.TextButton("Отмена", on_click=_close_modal),
                 ft.TextButton("Сохранить", on_click=save_edit),
             ],
         )
-
-        _open_dialog(dlg)
 
     def copy_task(task_info):
         if is_locked[0]:
@@ -1362,30 +1384,23 @@ def main(page: ft.Page):
         )
 
         def create_tab(e):
-            name = name_field.value.strip()
+            name = (name_field.value or "").strip()
             if name:
                 tabs_list.append({"name": name, "tasks": []})
                 save_all_tasks()
                 rebuild_tabs()
-            _close_dialog(dlg)
-
-        def cancel(e):
-            _close_dialog(dlg)
+            _close_modal()
 
         name_field.on_submit = create_tab
 
-        dlg = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Новая вкладка", color=TEXT_COLOR),
-            bgcolor="#252525",
-            content=ft.Container(width=250, content=name_field),
-            actions=[
-                ft.TextButton("Отмена", on_click=cancel),
+        _show_modal(
+            "Новая вкладка",
+            name_field,
+            [
+                ft.TextButton("Отмена", on_click=_close_modal),
                 ft.TextButton("Создать", on_click=create_tab),
             ],
         )
-
-        _open_dialog(dlg)
 
     def delete_tab(index):
         if is_locked[0] or len(tabs_list) <= 1:
@@ -1406,26 +1421,20 @@ def main(page: ft.Page):
 
             saver.save_tasks_deferred({"tabs": tabs_list, "active_tab": current_tab[0]})
             rebuild_tabs()
-            _close_dialog(dlg)
+            _close_modal()
 
-        def cancel(e):
-            _close_dialog(dlg)
-
-        dlg = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Удалить вкладку?", color=TEXT_COLOR),
-            bgcolor="#252525",
-            content=ft.Text(
-                f'Удалить "{tabs_list[index]["name"]}" и все её задачи?',
-                color="#999999",
-            ),
-            actions=[
-                ft.TextButton("Отмена", on_click=cancel),
+        body = ft.Text(
+            f'Удалить "{tabs_list[index]["name"]}" и все её задачи?',
+            color="#999999",
+        )
+        _show_modal(
+            "Удалить вкладку?",
+            body,
+            [
+                ft.TextButton("Отмена", on_click=_close_modal),
                 ft.TextButton("Удалить", on_click=confirm_delete),
             ],
         )
-
-        _open_dialog(dlg)
 
     def rebuild_tabs():
         tabs_row_ref[0].controls.clear()
