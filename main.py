@@ -312,16 +312,32 @@ class DeferredSaver:
 saver = DeferredSaver(delay=0.5)
 
 def get_icon_path():
-    return os.path.join(BASE_PATH, ICON_FILE)
+    # When frozen by PyInstaller, bundled data files live in sys._MEIPASS
+    # (a temp dir), NOT next to the .exe. Check there first.
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(os.path.join(meipass, ICON_FILE))
+    candidates.append(os.path.join(BASE_PATH, ICON_FILE))
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return candidates[-1]
 
 def create_tray_icon():
     if not TRAY_AVAILABLE:
         return None
 
     icon_path = get_icon_path()
-    try:
-        image = Image.open(icon_path) if os.path.exists(icon_path) else Image.new('RGB', (64, 64), color=(127, 90, 240))
-    except Exception:
+    if os.path.exists(icon_path):
+        try:
+            image = Image.open(icon_path)
+            log.info("tray icon loaded from %s", icon_path)
+        except Exception:
+            log.exception("tray icon failed to load from %s", icon_path)
+            image = Image.new('RGB', (64, 64), color=(127, 90, 240))
+    else:
+        log.warning("tray icon not found at %s — using purple fallback", icon_path)
         image = Image.new('RGB', (64, 64), color=(127, 90, 240))
 
     def show_window(icon, item):
